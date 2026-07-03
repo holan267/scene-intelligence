@@ -13,6 +13,11 @@ import uuid
 _SCENE_NS = uuid.UUID("6f6b1e7a-6c2a-4b8e-9d3a-2c1b0a9f8e7d")
 
 
+def new_id() -> str:
+    """Sinh id ngẫu nhiên (job/task…)."""
+    return uuid.uuid4().hex
+
+
 def new_video_id() -> str:
     """Sinh video_id ngẫu nhiên, ổn định suốt đời Video."""
     return uuid.uuid4().hex

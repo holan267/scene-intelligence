@@ -22,7 +22,7 @@ def upgrade() -> None:
     op.create_table(
         "video",
         sa.Column("video_id", sa.String(64), primary_key=True),  # id ổn định (AD-1)
-        sa.Column("framerate", sa.Float(), nullable=False),  # fps cấp Video (AD-12)
+        sa.Column("framerate", sa.Float(), nullable=True),  # fps cấp Video (AD-12), set lúc detect
         sa.Column("source_key", sa.String(512), nullable=False),  # media-key (AD-23)
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )

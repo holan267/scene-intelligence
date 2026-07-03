@@ -5,9 +5,12 @@ Các endpoint ingest/search thêm ở story sau (AD-2 tách write/read).
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, FastAPI
 
 from api.envelope import ok
+from api.routes_ingest import router as ingest_router
 from shared.db import check_db
 from shared.storage import build_storage
 
@@ -30,8 +33,8 @@ def create_app() -> FastAPI:
 
     @v1.get("/health")
     async def health(
-        db_ok: bool = Depends(db_health),
-        store_ok: bool = Depends(storage_health),
+        db_ok: Annotated[bool, Depends(db_health)],
+        store_ok: Annotated[bool, Depends(storage_health)],
     ) -> dict:
         return ok(
             meta={
@@ -41,6 +44,7 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(v1)
+    app.include_router(ingest_router)
     return app
 
 

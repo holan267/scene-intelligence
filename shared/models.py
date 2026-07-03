@@ -19,7 +19,8 @@ class Video(Base):
     __tablename__ = "video"
 
     video_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # id ổn định (AD-1)
-    framerate: Mapped[float] = mapped_column(Float, nullable=False)  # fps ở cấp Video (AD-12)
+    # fps ở cấp Video (AD-12); nullable vì xác định lúc detect (Story 1.3), chưa biết khi ingest
+    framerate: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_key: Mapped[str] = mapped_column(String(512), nullable=False)  # media-key (AD-23)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -39,3 +40,28 @@ class Scene(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped[Video] = relationship(back_populates="scenes")
+
+
+class Job(Base):
+    """Batch job (AD-10, AD-18) — domain do orchestrator sở hữu."""
+
+    __tablename__ = "job"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="ingest_batch")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IngestTask(Base):
+    """Một task nạp/đăng ký một video trong lô. source_key unique -> idempotent (AD-5)."""
+
+    __tablename__ = "ingest_task"
+
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("job.job_id"), nullable=False, index=True)
+    source_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    video_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

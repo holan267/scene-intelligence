@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: scene
       POSTGRES_DB: scene_intelligence
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scene -d scene_intelligence"]
       interval: 5s
@@ -26,7 +26,7 @@ services:
       MEDIA_ROOT: /data/media          # mount NAS/SAN cho kho thật; ổ local cho dev
       API_ENV: dev
     volumes:
-      - media:/data/media              # <-- đổi thành đường NAS/SAN thật khi triển khai
+      - D:/media:/data/media            # <-- bind mount ổ D: Windows; đổi thành NAS/SAN thật khi triển khai
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,4 +35,3 @@ services:
 
 volumes:
   pgdata:
-  media:
