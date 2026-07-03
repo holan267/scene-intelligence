@@ -1,0 +1,38 @@
+# On-prem, 1 node, air-gap được (AD-14). Không dịch vụ cloud runtime.
+services:
+  postgres:
+    image: pgvector/pgvector:pg18   # PostgreSQL 18 + pgvector 0.8.x (AD-4)
+    environment:
+      POSTGRES_USER: scene
+      POSTGRES_PASSWORD: scene
+      POSTGRES_DB: scene_intelligence
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scene -d scene_intelligence"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://scene:scene@postgres:5432/scene_intelligence
+      MEDIA_BACKEND: filesystem
+      MEDIA_ROOT: /data/media          # mount NAS/SAN cho kho thật; ổ local cho dev
+      API_ENV: dev
+    volumes:
+      - media:/data/media              # <-- đổi thành đường NAS/SAN thật khi triển khai
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
+  media:

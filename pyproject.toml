@@ -1,0 +1,31 @@
+[project]
+name = "scene-intelligence"
+version = "0.1.0"
+description = "On-prem AI video scene search for broadcast newsrooms (MVP scaffold)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139,<0.140",
+    "uvicorn[standard]>=0.34",
+    "pydantic-settings>=2.5",
+    "sqlalchemy[asyncio]>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.setuptools.packages.find]
+include = ["api*", "pipeline*", "search*", "models*", "eval*", "shared*"]
