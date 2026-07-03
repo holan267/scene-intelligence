@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, func
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -38,6 +38,9 @@ class Scene(Base):
     end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # cổng hiển thị (AD-17): chỉ 'indexed' mới vào kết quả search (bật ở story sau)
     search_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # Làm giàu tiếng Việt (Story 1.4, AD-5 cột riêng): điền bởi stage ASR/OCR
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # ASR (AD-9)
+    ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # OCR (AD-9)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped[Video] = relationship(back_populates="scenes")
