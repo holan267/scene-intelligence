@@ -1,5 +1,14 @@
 # Deferred Work
 
+## Deferred from: code review of story-1.7 (2026-07-03)
+
+- **`skip_locked=False` không thực sự "chờ khoá"** [pipeline/ingest.py] — chỉ bỏ khoá hoàn toàn (`with_for_update` không được gọi), tên tham số gây hiểu nhầm là sẽ blocking-lock. Đây là pattern có sẵn từ `claim_next_task` (Story 1.2), `reclaim_stale_tasks` chỉ theo đúng convention đó. *(Defer: đổi tên/ngữ nghĩa tham số ảnh hưởng cả API hiện có, ngoài phạm vi story này.)*
+- **`reclaim_stale_tasks` không có fencing/heartbeat/generation-token** [pipeline/ingest.py] — lease chỉ dựa trên thời gian trôi qua; worker còn sống nhưng xử lý chậm hơn `task_lease_seconds` vẫn bị worker khác "cướp" task, có thể xử lý trùng. Giảm nhẹ hiện tại: `process_task` idempotent + bắt exception rộng nên trùng lặp không làm hỏng dữ liệu, chỉ lãng phí công. *(Defer: fix đầy đủ cần thiết kế lease-token/ownership riêng, lớn hơn phạm vi MVP đơn tiến trình của Story 1.7.)*
+- **`reclaim_stale_tasks` không giới hạn (`LIMIT`) batch xử lý mỗi lượt** [pipeline/ingest.py] — sau một outage thật với backlog `claimed` lớn, một lượt gọi sẽ fetch+lock+loop toàn bộ trong Python. *(Defer: cần phân trang/giới hạn batch khi có bằng chứng thực tế về quy mô này.)*
+- **Không có index cho `(status, finished_at)` trên `ingest_task`** [pipeline/metrics.py, migrations/versions/0007_ingest_task_lease_metrics.py] — các query `collect_metrics` sẽ full-scan khi bảng lớn dần. *(Defer: tối ưu hiệu năng khi có bằng chứng cần thiết, tránh thêm index thừa sớm.)*
+- **`deploy/backup.sh` không chống hai lượt chạy chồng nhau** [deploy/backup.sh] — tên file theo timestamp độ phân giải giây, không có lock file; hai lượt chạy trong cùng giây (thủ công hoặc cron overlap) có thể ghi đè nhau. *(Defer: thêm `flock`/PID-guard khi triển khai cron thật.)*
+- **`deploy/backup.sh` không dọn artifact dở dang / không kiểm tra toàn vẹn sau khi ghi** [deploy/backup.sh] — nếu `pg_dump`/`tar` chết giữa chừng (hết đĩa, mất kết nối), file dump/tar dở dang bị bỏ lại mà không xoá, không có bước xác minh (`pg_restore --list`/`tar -t`) trước khi báo "xong". *(Defer: mở rộng thành backup framework đầy đủ hơn là quá phạm vi MVP script hiện tại.)*
+
 ## Deferred from: code review (2026-07-03)
 
 - **pgdata mount path** [deploy/docker-compose.yml] — mount `pgdata` ở `/var/lib/postgresql` (parent) thay vì `/var/lib/postgresql/data` (PGDATA chuẩn) → data thật rơi vào anonymous volume. Bạn đã sửa thủ công; khuyến nghị đổi về `/data`. *(Defer: hạ tầng, không chặn logic.)*

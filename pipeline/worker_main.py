@@ -1,7 +1,8 @@
 """Entry point worker: vòng lặp drain hàng đợi ingest. Chạy: `python -m pipeline.worker_main`.
 
-Wiring runtime cho AD-18 (orchestrator finalize job). Đơn tiến trình cho MVP; scale nhiều
-worker + lease/reclaim là hardening sau (deferred-work.md).
+Wiring runtime cho AD-18 (orchestrator finalize job) + reclaim lease (NFR-2, Story 1.7) —
+mỗi vòng lặp `drain()` tự requeue/expire task 'claimed' quá hạn, không cần scheduler riêng.
+Đơn tiến trình cho MVP; không có `worker_id` (không cần định danh worker cụ thể ở quy mô này).
 """
 from __future__ import annotations
 

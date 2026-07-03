@@ -1,0 +1,144 @@
+---
+baseline_commit: ec9f514b53b548dbcceec1ece095275bfc335554
+---
+
+# Story 1.7: Vận hành — Metrics, Backup & tính bền
+
+Status: done
+
+<!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
+
+## Story
+
+As a **người vận hành hệ thống**,
+I want **metrics quan sát được, sao lưu kho critical, và ingest bền**,
+so that **tôi tin hệ thống chạy được ở quy mô kho lớn và phục hồi được**.
+
+## Acceptance Criteria
+
+1. **Given** hệ đang ingest, **When** tôi gọi `GET /api/v1/metrics`, **Then** response trả `queue_depth` (số `ingest_task` đang `queued`+`claimed`), `ingest_throughput_per_min` (số task `done` hoàn tất trong cửa sổ gần đây / phút), và `job_error_rate` (tỷ lệ task `error` trong số task đã hoàn tất trong cửa sổ) — [Source: NFR-8].
+2. **Given** metrics endpoint đã trả `ingest_throughput_per_min`, **Then** con số này là cơ sở để đo mục tiêu thông lượng làm giàu `[ASSUMPTION: ≥2x realtime/GPU]` — **đo thật cần GPU + model server thật, ngoài phạm vi test tự động của story này** (adapter production Story 1.5/1.6 vẫn ở trạng thái guarded, chưa chạy môi trường thật) — [Source: NFR-1].
+3. **Given** một `ingest_task` đang `claimed` bởi worker, **When** worker crash (không có tiến trình nào hoàn tất/lỗi task đó nữa), **Then** sau khi quá hạn lease (`task_lease_seconds`), task được **requeue tự động** về `queued` (nếu số lần thử còn dưới `task_max_attempts`) để worker khác nhận lại — **không mất việc**; nếu đã hết số lần thử cho phép, task chuyển `error` với `reason="lease_timeout_exceeded"` (vẫn không kẹt vĩnh viễn, job vẫn finalize được) — [Source: NFR-2, #AD-18].
+4. **Given** cấu hình triển khai on-prem, **Then** có script backup phủ đúng hai kho **backup-critical**: **Postgres (SoT)** qua `pg_dump` và **media gốc** (không gồm derived: keyframe) qua rsync/tar loại trừ `*/keyframes/*`; vector store/FTS (nằm trong cùng Postgres) và keyframe/thumbnail (derived, rebuild được từ SoT+media gốc) **không** cần cơ chế backup riêng ngoài những gì `pg_dump` đã tự nhiên phủ — [Source: NFR-9, #AD-22].
+
+## Tasks / Subtasks
+
+- [x] **Task 1 — Vá lỗi mount PGDATA đã defer** (hardening carried over từ code review trước, chặn đúng ý nghĩa "backup Postgres" ở AC #4): [deploy/docker-compose.yml]
+  - [x] Đổi volume Postgres từ `pgdata:/var/lib/postgresql` (parent — data thật rơi vào anonymous volume do image Postgres tự khai `VOLUME /var/lib/postgresql/data`) sang `pgdata:/var/lib/postgresql/data` (PGDATA chuẩn, đúng named volume `pgdata`).
+  - [x] Không đổi gì khác trong service `postgres` (image, healthcheck, ports giữ nguyên).
+
+- [x] **Task 2 — Migration `0007`: cột crash-recovery + metrics trên `ingest_task`** (AC: #1, #2, #3): `migrations/versions/0007_ingest_task_lease_metrics.py`, nối tiếp `0006`:
+  - [x] `claimed_at` (DateTime(timezone=True), nullable) — thời điểm task được `claim_next_task` claim gần nhất; `NULL` khi task chưa từng claim hoặc đã bị requeue.
+  - [x] `attempts` (Integer, NOT NULL, `server_default="0"`) — đếm số lần claim (tăng mỗi lần `claim_next_task` claim task này, kể cả lần đầu).
+  - [x] `finished_at` (DateTime(timezone=True), nullable) — thời điểm task chuyển `done` hoặc `error` (dùng cho tính `ingest_throughput_per_min`/`job_error_rate` theo cửa sổ thời gian).
+  - [x] Index `ix_ingest_task_status_claimed_at` trên `(status, claimed_at)` — phục vụ query reclaim (`WHERE status='claimed' AND claimed_at < cutoff`) hiệu quả trên kho lớn.
+  - [x] Cập nhật `shared/models.py::IngestTask` thêm 3 cột tương ứng (kiểu Python: `datetime | None`, `int`, `datetime | None`).
+
+- [x] **Task 3 — Lease/reclaim: worker crash → job retry, không mất việc** (AC: #3): [pipeline/ingest.py]
+  - [x] `claim_next_task`: khi claim thành công, set thêm `task.claimed_at = datetime.now(timezone.utc)` và `task.attempts = (task.attempts or 0) + 1` (giữ nguyên logic `SELECT ... FOR UPDATE SKIP LOCKED` + tiebreaker hiện có, không đổi).
+  - [x] Hàm mới `reclaim_stale_tasks(session, *, lease_seconds, max_attempts, skip_locked=True) -> dict`: chọn `IngestTask` có `status="claimed"` và `claimed_at < now() - lease_seconds` (dùng `with_for_update(skip_locked=True)` khi `skip_locked=True`, cùng pattern với `claim_next_task` để an toàn concurrent). Với mỗi task quá hạn: nếu `attempts < max_attempts` → `status="queued"`, `claimed_at=None` (requeue — worker khác nhận lại qua `claim_next_task` bình thường); ngược lại → `status="error"`, `reason="lease_timeout_exceeded"`, `finished_at=datetime.now(timezone.utc)`. Trả `{"requeued": int, "expired": int}`.
+  - [x] **Đây là hàm orchestrator** (cùng nhóm với `finalize_job`, không phải logic "worker xử lý task của mình" — đúng AD-18: quyết định requeue/expire task của người khác là quyết định domain-job, KHÔNG phải việc `process_task`).
+  - [x] `pipeline/workers.py::drain()`: gọi `reclaim_stale_tasks(session, lease_seconds=settings.task_lease_seconds, max_attempts=settings.task_max_attempts)` **một lần ở đầu hàm**, trước vòng lặp `claim_next_task` — để task vừa được requeue có thể được claim lại ngay trong cùng lượt `drain()` đó. `pipeline/worker_main.py` đã chạy `drain()` mỗi 2s trong vòng lặp vô hạn sẵn có (`_loop`) — không cần thêm tiến trình/scheduler mới, chỉ cần `drain()` tự làm thêm việc reclaim mỗi lượt.
+  - [x] `pipeline/workers.py::process_task`: set thêm `task.finished_at = datetime.now(timezone.utc)` ở cả nhánh `done` và nhánh `except` (`error`) — cần cho AC #1/#2 tính throughput/error-rate theo cửa sổ thời gian.
+  - [x] Cập nhật docstring đầu `pipeline/worker_main.py` — bỏ câu "scale nhiều worker + lease/reclaim là hardening sau (deferred-work.md)" (không còn đúng, story này đã làm); note lại rằng `attempts`/`claimed_at` không có `worker_id` (single-process MVP, không cần định danh worker cụ thể).
+  - [x] `finalize_job` **giữ nguyên logic hiện có** (job → `done` khi không còn `queued`/`claimed`, bất kể có task `error` hay không) — đây là hành vi đã có từ Story 1.2, KHÔNG phải phạm vi sửa của story này; job vẫn "done" dù có task lỗi bên trong là chủ ý (không có job-status "failed" trong domain hiện tại).
+
+- [x] **Task 4 — Settings mới** (AC: #1, #2, #3): [shared/config.py] thêm vào `Settings` (theo đúng pattern field có default hiện có, không cần validator riêng):
+  - [x] `task_lease_seconds: int = 900` — `[ASSUMPTION: 15 phút]`, thời gian một task được coi là "worker còn sống"; đủ rộng cho bước hiện tại (`process_task` chỉ đăng ký Video, rất nhanh) — **lưu ý cho tương lai**: nếu các stage nặng hơn (detect/enrich/describe/embed) sau này được wire vào CÙNG hàng đợi `ingest_task`, giá trị này cần tăng tương ứng thời gian xử lý thật của stage nặng nhất.
+  - [x] `task_max_attempts: int = 3` — `[ASSUMPTION]`, số lần một task được phép requeue trước khi coi là lỗi vĩnh viễn.
+  - [x] `metrics_window_seconds: int = 300` — `[ASSUMPTION: 5 phút]`, cửa sổ trượt để tính `ingest_throughput_per_min`/`job_error_rate`.
+
+- [x] **Task 5 — Metrics endpoint** (AC: #1, #2): 
+  - [x] `pipeline/metrics.py` (module mới, song song `pipeline/noise.py` — thống kê toàn cục, không gắn 1 Scene/Job cụ thể): `async def collect_metrics(session: AsyncSession, *, window_seconds: int) -> dict`. Query 1: `queue_depth = count(IngestTask) WHERE status IN ("queued","claimed")` (toàn cục, không lọc theo job). Query 2: `cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)`; `completed = count(IngestTask) WHERE status IN ("done","error") AND finished_at >= cutoff`; `errored = count(IngestTask) WHERE status="error" AND finished_at >= cutoff`. Trả `{"queue_depth": queue_depth, "ingest_throughput_per_min": completed / (window_seconds/60), "job_error_rate": (errored/completed if completed else 0.0), "window_seconds": window_seconds}`. **Task `skipped` (bị loại ở `enqueue_batch`, chưa từng qua `claim`) không tính vào `completed`/`errored`** — đây là quyết định phạm vi: `skipped` là bị từ chối trước khi vào hàng đợi (file không đọc được), không phải "worker xử lý lỗi".
+  - [x] `api/routes_metrics.py` (router mới, cùng pattern `api/routes_ingest.py`): `router = APIRouter(prefix="/api/v1")`; `GET /metrics` → `ok(meta=await collect_metrics(session, window_seconds=get_settings().metrics_window_seconds))` (dùng `api/envelope.py::ok`, cùng convention `{results, meta}` với `/jobs/{job_id}` — KHÔNG dùng format Prometheus text-exposition: không có `prometheus_client` hay tương đương trong `pyproject.toml`/architecture stack, thêm dependency ngoài phạm vi story này; JSON qua envelope hiện có là đủ cho "export metrics" ở MVP — xem Dev Notes).
+  - [x] `api/main.py`: `app.include_router(metrics_router)` (cùng chỗ `include_router(ingest_router)`).
+
+- [x] **Task 6 — Backup Postgres + media gốc** (AC: #4): 
+  - [x] `deploy/backup.sh` (mới): script POSIX shell — (1) `pg_dump` định dạng custom (`-Fc`) toàn bộ DB `scene_intelligence` ra `${BACKUP_DIR}/postgres_$(date +%Y%m%d%H%M%S).dump` (dùng biến kết nối đã có: user/host/db khớp `DATABASE_URL` hiện tại của compose); (2) đóng gói media gốc dưới `${MEDIA_ROOT}` ra `${BACKUP_DIR}/media_$(date +%Y%m%d%H%M%S).tar.gz` bằng `tar` **loại trừ** thư mục con `keyframes` (derived — mọi keyframe được ghi ở path `{video_id}/keyframes/{shot_id}.jpg`, xem `pipeline/detect.py`) — dùng `tar --exclude='*/keyframes/*'`. Không cần thêm dependency Python nào (chạy `pg_dump`/`tar` có sẵn trong image `postgres`/base OS, không phải trong `api` container).
+  - [x] `deploy/README.md`: thêm mục "Backup" — cách chạy `backup.sh` (thủ công hoặc qua cron ngoài host, compose MVP **không** thêm service scheduler mới — lịch/tần suất backup-DR cụ thể đã được Architecture Spine chốt là "cần khảo sát hạ tầng thật của đài", ngoài phạm vi story này), biến `BACKUP_DIR` cần set, và ghi chú phục hồi: `pg_restore` cho Postgres, giải nén `tar` cho media — **không** cần phục hồi riêng `scene_embedding`/FTS/keyframe (dẫn xuất, tự dựng lại được từ pipeline sau khi phục hồi SoT + media gốc, theo AD-4/AD-22).
+  - [x] **Không** cố tách bảng `scene_embedding` ra khỏi `pg_dump` — nó nằm chung DB với SoT nên `pg_dump` tự nhiên phủ luôn cả nó; AD-22 chỉ nói "không **cần** backup ngang hàng" (không bắt buộc, không phải cấm), tách bảng riêng là phức tạp hoá không cần thiết ở MVP.
+
+- [x] **Task 7 — Test** (AC: #1-#4, trừ Task 1/6 là hạ tầng không unit-test được):
+  - [x] `tests/test_ingest_reclaim.py`: `claim_next_task` set `claimed_at`+tăng `attempts`; `reclaim_stale_tasks` — task còn trong lease (claimed_at gần) không bị đụng; task quá lease với `attempts < max_attempts` → về `queued`, `claimed_at=None`; task quá lease với `attempts >= max_attempts` → `error`, `reason="lease_timeout_exceeded"`, có `finished_at`; sau khi reclaim requeue, `claim_next_task` claim lại được task đó (worker khác "cứu" được task của worker chết — mô phỏng đúng AC #3).
+  - [x] `tests/test_metrics.py`: seed `IngestTask` với các tổ hợp status/`finished_at` (trong/ngoài window) → `collect_metrics` trả đúng `queue_depth`/`ingest_throughput_per_min`/`job_error_rate`; `completed=0` trong window → `job_error_rate=0.0` (không chia 0); test route registration qua `openapi()["paths"]` (cùng pattern `test_ingest_routes_registered` hiện có — **không** gọi route qua `client` fixture vì fixture đó chỉ override `db_health`/`storage_health`, không override `get_session`; gọi thật sẽ cần Postgres thật, không phải pattern đã có trong test suite này).
+  - [x] Cập nhật `tests/test_ingest.py` nếu cần (test cũ dùng `run_once`/`drain` không được phá khi thêm `claimed_at`/`attempts`/`finished_at` — các cột mới đều có default hợp lý, không cần sửa test hiện có, chỉ cần xác nhận vẫn pass — đã xác nhận: 77 passed).
+  - [x] `deploy/backup.sh` và fix mount `pgdata`: **không** viết pytest cho shell script/docker volume — xác minh thủ công (`docker compose up`, kiểm `docker volume inspect`, chạy thử `backup.sh` với Postgres thật) và ghi lại trong Dev Agent Record/Completion Notes; **CHƯA chạy môi trường Docker thật trong phiên dev này** (ghi rõ ở Completion Notes) — script đã review kỹ bằng mắt theo đúng convention biến môi trường hiện có (`DATABASE_URL`/`MEDIA_ROOT` của compose).
+
+### Review Findings
+
+- [x] [Review][Patch] Job kẹt vĩnh viễn ở `status="running"` khi reclaim expire task cuối cùng của job — `drain()` chỉ đưa `job_id` vào tập finalize từ nhánh claim, không từ nhánh expire của `reclaim_stale_tasks` [pipeline/workers.py:61-85, pipeline/ingest.py:176-201] — **Fixed**: `reclaim_stale_tasks` trả thêm `job_ids` (mọi task bị đụng, requeue lẫn expire); `drain()` seed tập finalize từ đó trước khi vào vòng claim. Test mới: `tests/test_ingest_reclaim.py::test_drain_finalizes_job_when_its_last_task_expires_via_reclaim`.
+- [x] [Review][Patch] `ingest_throughput_per_min` tính cả task `error` vào tử số, trái với định nghĩa nguyên văn AC #1 ("số task `done` hoàn tất... / phút") [pipeline/metrics.py:30-47] — **Fixed**: throughput chỉ đếm `done`; `job_error_rate` vẫn dùng mẫu số `done+error`. Test cập nhật: `tests/test_metrics.py::test_throughput_and_error_rate_within_window`.
+- [x] [Review][Patch] `GET /api/v1/metrics` ném `ZeroDivisionError` (500) nếu `metrics_window_seconds` bị cấu hình về 0 — chưa có validation trên các setting mới [shared/config.py, pipeline/metrics.py:47] — **Fixed**: `task_lease_seconds`/`task_max_attempts`/`metrics_window_seconds` dùng `Field(gt=0)`. Test mới: `tests/test_config.py::test_zero_or_negative_rejected`.
+- [x] [Review][Patch] `enqueue_batch` (đường requeue `skipped`/`error` có sẵn từ Story 1.2) không reset `attempts`/`claimed_at`/`finished_at` — task đã hết `task_max_attempts` ở lần chạy trước, khi thủ thư nạp lại cùng thư mục, bị reclaim expire ngay lập tức ở lần crash đầu tiên của lượt mới (mất hết "3 lần thử/lượt" đã định) [pipeline/ingest.py:96-104] — **Fixed**: reset cả 3 cột khi requeue task cũ. Test mới: `tests/test_ingest_reclaim.py::test_requeue_via_enqueue_batch_resets_lease_and_attempts`.
+- [x] [Review][Patch] Thiếu vài mảnh vận hành nhỏ cho backup/docker: `deploy/backup.sh` không có bit thực thi (không `+x`) trong khi README gọi `./backup.sh`; chưa ghi chú `PGPASSWORD`/`.pgpass` cho chạy không tương tác qua cron; chưa có ghi chú nâng cấp cho ai đã có volume `pgdata` cũ từ trước khi đổi mount path [deploy/backup.sh, deploy/README.md, deploy/docker-compose.yml] — **Fixed**: `chmod +x deploy/backup.sh`; ghi chú `PGPASSWORD` trong script + README; thêm cảnh báo nâng cấp volume `pgdata` trong README.
+- [x] [Review][Defer] `skip_locked=False` không "chờ khoá", chỉ đơn giản bỏ khoá hoàn toàn (tên tham số gây hiểu nhầm) — nhưng đây là đúng pattern có sẵn từ `claim_next_task` (Story 1.2), không phải regression mới của story này [pipeline/ingest.py] — deferred, pre-existing
+- [x] [Review][Defer] `reclaim_stale_tasks` không có fencing/heartbeat/generation-token — worker còn sống nhưng chạy chậm quá lease vẫn bị worker khác "cướp" task, có thể xử lý trùng (giảm nhẹ bởi `process_task` đã idempotent + bắt exception rộng); fix đầy đủ cần thiết kế lease-token lớn hơn, ngoài phạm vi MVP đơn tiến trình hiện tại [pipeline/ingest.py] — deferred, pre-existing (đã ghi nhận là giới hạn MVP trong Dev Notes)
+- [x] [Review][Defer] `reclaim_stale_tasks` không giới hạn (`LIMIT`) số task quá hạn xử lý một lượt — sau một outage thật, backlog lớn bị fetch+lock+loop hết trong một lần gọi [pipeline/ingest.py] — deferred, pre-existing
+- [x] [Review][Defer] Không có index cho `(status, finished_at)` — các query `collect_metrics` full-scan `ingest_task` khi bảng lớn dần [pipeline/metrics.py, migrations/versions/0007_ingest_task_lease_metrics.py] — deferred, pre-existing
+- [x] [Review][Defer] `deploy/backup.sh` không có cơ chế chống hai lượt chạy chồng nhau (timestamp độ phân giải giây, không lock file) [deploy/backup.sh] — deferred, pre-existing
+- [x] [Review][Defer] `deploy/backup.sh` không dọn artifact dở dang và không kiểm tra toàn vẹn (`pg_restore --list`/`tar -t`) sau khi ghi — backup lỗi giữa chừng có thể để lại file hỏng mà không ai biết tới lúc cần phục hồi thật [deploy/backup.sh] — deferred, pre-existing
+
+## Dev Notes
+
+- **Phạm vi chặt cho crash-recovery (AC #3)**: `reclaim_stale_tasks` chỉ áp dụng cho hàng đợi `ingest_task` hiện có (Story 1.2 — bước đăng ký Video). Các stage sau (`pipeline/detect.py`, `enrich.py`, `enrich_vision.py`, `describe.py`, `embed_index.py`) **chưa được wire vào bất kỳ hàng đợi/worker nào** — chúng là logic thuần gọi trực tiếp trong test, chưa có orchestrator thật chạy chúng theo job/task. Đừng mở rộng lease/reclaim sang các module đó — ngoài phạm vi story này (không có "task" nào đại diện cho chúng để mà reclaim).
+- **AD-18 nhất quán**: `reclaim_stale_tasks` là hàm **orchestrator** (cùng nhóm `finalize_job`/`claim_next_task` trong `pipeline/ingest.py`), KHÔNG đặt trong `pipeline/workers.py::process_task` — giữ đúng ranh giới "worker chỉ báo tiến độ task của mình, orchestrator quyết trạng thái job/hàng đợi".
+- **Không có job-status "failed"**: domain job hiện tại chỉ có `queued`/`running`/`done` (`shared/models.py::Job.status`). Một job có task `error` (kể cả do hết `max_attempts`) vẫn chuyển `done` khi hàng đợi rỗng — hành vi này **có từ Story 1.2**, không phải bug cần sửa ở đây; job-level "có lỗi hay không" đã lộ ra qua `job_progress()["error"]` (endpoint `/jobs/{job_id}` hiện có) và giờ thêm `job_error_rate` toàn cục qua `/metrics`.
+- **NFR-1 (thông lượng ≥2x realtime/GPU) không đo được bằng test tự động**: model server thật (Qwen3-VL/BGE-M3/PhoWhisper/InsightFace/YOLO) chưa chạy môi trường dev (Story 1.4-1.6 đều dùng adapter guarded, chưa kết nối). Story này chỉ đảm bảo con số thông lượng **đo được và lộ ra** qua `/metrics`; xác nhận đạt ngưỡng thật là việc vận hành sau khi có GPU thật, không phải AC test được ở đây.
+- **Metrics format = JSON envelope, không phải Prometheus**: không có `prometheus_client`/exporter nào trong `pyproject.toml` hay trong Architecture Spine/stack-verification.md — cả hai tài liệu chỉ yêu cầu chung chung "export metrics" (Consistency Conventions, không nêu tool cụ thể) và liệt "Cơ chế backup-DR cụ thể... cần khảo sát hạ tầng thật của đài" là **deferred**. Vì vậy: dùng đúng convention envelope `{results, meta}` đã có (`api/envelope.py`) qua endpoint JSON thường, KHÔNG thêm dependency `prometheus_client`/`prometheus-fastapi-instrumentator` — đó sẽ là quyết định stack mới ngoài thẩm quyền story-level, để dành khi có khảo sát hạ tầng ops thật.
+- **Backup — vì sao không tách bảng `scene_embedding` khỏi `pg_dump`**: `scene_embedding`/FTS (`fts_text`) và SoT (`video`/`scene`/`job`/`ingest_task`...) sống **chung một Postgres instance** (không phải vector DB riêng — pgvector nằm trong Postgres, xem Story 1.6). `pg_dump` toàn DB tự nhiên phủ luôn phần dẫn xuất này; AD-22 chỉ nói dẫn xuất "không **cần** backup ngang hàng" (nghĩa là: mất nó không sao, dựng lại được), không phải "cấm backup nó". Đừng cố lọc bảng ra khỏi dump — phức tạp hoá không cần thiết.
+- **Media gốc vs derived trên storage-port**: keyframe luôn ghi ở media-key dạng `{video_id}/keyframes/{shot_id}.jpg` (cố định, xem `pipeline/detect.py:117`); media gốc giữ nguyên `source_key` = path tương đối `MEDIA_ROOT` do thủ thư đặt (tuỳ ý, không có prefix cố định). Vì vậy loại trừ đúng bằng pattern `*/keyframes/*` là đáng tin cậy (mọi derived file hiện tại đều nằm dưới subpath này; không có proxy/thumbnail nào khác được sinh ra trong code hiện tại ngoài keyframe — nếu sau này có thêm loại derived khác trên storage, cần bổ sung pattern loại trừ tương ứng).
+- **Vá `pgdata` mount (Task 1)**: đây là item đã defer rõ ràng từ code review trước (`deferred-work.md` dòng 5), gắn nhãn "hạ tầng, không chặn logic" lúc đó — nhưng giờ trực tiếp liên quan đến AC #4 (backup Postgres phải backup đúng chỗ dữ liệu thật nằm), nên sửa trong story này thay vì tiếp tục defer.
+- **`claim_next_task`/`reclaim_stale_tasks` dùng `datetime.now(timezone.utc)` ở Python, không dùng `func.now()` SQL** — nhất quán với cách so sánh thời gian có thể chạy trên cả Postgres (prod) và sqlite (test qua `aiosqlite`, xem `tests/conftest.py::async_session`); `func.now()` chỉ dùng cho `server_default` cột `created_at` hiện có, không dùng để lọc `WHERE`.
+- **Testing**: theo pattern hiện có — `tests/conftest.py::async_session` (sqlite in-memory, `Base.metadata.create_all`), `client` fixture (`TestClient` với `db_health`/`storage_health` override) cho test route. `with_for_update(skip_locked=True)` chỉ chạy trên Postgres thật — các hàm liên quan (`claim_next_task`, `reclaim_stale_tasks`) đã có tham số `skip_locked: bool = True` để test gọi với `skip_locked=False` trên sqlite (đúng pattern `claim_next_task` hiện tại).
+
+### Project Structure Notes
+
+- `pipeline/metrics.py` — module mới, song song `pipeline/noise.py` (thống kê toàn cục qua nhiều Job/Scene, không phải 1 stage/Scene cụ thể).
+- `api/routes_metrics.py` — router mới, song song `api/routes_ingest.py`; đăng ký thêm trong `api/main.py::create_app()`.
+- `migrations/versions/0007_ingest_task_lease_metrics.py` — nối tiếp `0006` (Story 1.6).
+- `deploy/backup.sh` — file mới trong `deploy/` (cạnh `docker-compose.yml`, `Dockerfile`, `entrypoint.sh`, `README.md`).
+- Sửa tại chỗ (không tạo file mới): `pipeline/ingest.py` (thêm `reclaim_stale_tasks`, sửa `claim_next_task`), `pipeline/workers.py` (`process_task` set `finished_at`, `drain()` gọi reclaim), `pipeline/worker_main.py` (cập nhật docstring), `shared/config.py` (3 setting mới), `shared/models.py` (3 cột mới trên `IngestTask`), `deploy/docker-compose.yml` (sửa mount), `deploy/README.md` (mục Backup mới).
+
+### References
+
+- [Source: _bmad-output/planning-artifacts/epics.md#Story-1.7]
+- [Source: _bmad-output/planning-artifacts/architecture/architecture-scene-intelligence-2026-07-03/ARCHITECTURE-SPINE.md#AD-10,#AD-14,#AD-18,#AD-22] (dòng ~104-107 AD-10, ~124-127 AD-14, ~144-147 AD-18, ~164-167 AD-22, dòng 181 Observability convention, dòng 297 Deferred backup-DR cụ thể)
+- [Source: _bmad-output/planning-artifacts/prds/prd-scene-intelligence-2026-07-03/prd.md#NFR-1,#NFR-2,#NFR-8,#NFR-9]
+- [Source: _bmad-output/implementation-artifacts/deferred-work.md] (dòng 5 pgdata mount, dòng 6 task kẹt claimed khi worker crash — cả hai được giải quyết ở story này)
+- [Source: _bmad-output/implementation-artifacts/1-6-scene-document-embedding-siet-nhieu-cong-index.md] (pattern module mới song song stage, migration nối tiếp, guarded adapter — không áp dụng trực tiếp ở story này vì không có adapter model mới)
+- [Source: pipeline/ingest.py, pipeline/workers.py, pipeline/worker_main.py, pipeline/detect.py, shared/models.py, shared/config.py, shared/storage.py, api/main.py, api/routes_ingest.py, api/envelope.py, deploy/docker-compose.yml, deploy/README.md, migrations/versions/0002_ingest_queue.py, tests/conftest.py, tests/test_ingest.py]
+
+## Dev Agent Record
+
+### Agent Model Used
+
+claude-sonnet-5 (BMad dev-story)
+
+### Debug Log References
+
+- `uv run pytest` → **77 passed** (67 trước + 10 mới: 5 `test_ingest_reclaim.py` + 5 `test_metrics.py`).
+- `uv run ruff check pipeline/ api/ shared/ tests/ migrations/ deploy/` → sạch.
+- `deploy/backup.sh` + fix mount `pgdata`: **chưa chạy môi trường Docker/Postgres thật** trong phiên dev này (không có Docker daemon truy cập được) — đã review kỹ bằng mắt theo đúng biến môi trường hiện có (`DATABASE_URL`/`MEDIA_ROOT`), khớp convention `pg_isready`/entrypoint đã có; khuyến nghị chạy thử `docker compose up` + `backup.sh` thật trước khi triển khai production.
+- **Code review (5 patch áp dụng, xem Review Findings)**: `uv run pytest` → **83 passed** (77 + 6 mới: `test_drain_finalizes_job_when_its_last_task_expires_via_reclaim`, `test_requeue_via_enqueue_batch_resets_lease_and_attempts`, `test_lease_and_metrics_settings_defaults`, `test_zero_or_negative_rejected` x3). `uv run ruff check` → sạch.
+
+### Completion Notes List
+
+- **Migration `0007`**: thêm `claimed_at`/`attempts`/`finished_at` vào `ingest_task` + index `(status, claimed_at)`; `shared/models.py::IngestTask` cập nhật tương ứng.
+- **Crash-recovery (AC #3)**: `claim_next_task` set `claimed_at`+tăng `attempts`; hàm orchestrator mới `reclaim_stale_tasks` requeue task `claimed` quá lease (`task_lease_seconds`, mặc định 900s) nếu còn dưới `task_max_attempts` (mặc định 3), ngược lại chuyển `error`/`lease_timeout_exceeded`. `pipeline/workers.py::drain()` gọi reclaim ở đầu mỗi lượt — `worker_main.py` đã loop `drain()` mỗi 2s sẵn có, không cần scheduler mới. `process_task` set `finished_at` ở cả nhánh `done`/`error`.
+- **Metrics (AC #1, #2)**: `pipeline/metrics.py::collect_metrics()` — `queue_depth` (queued+claimed toàn cục), `ingest_throughput_per_min`/`job_error_rate` theo cửa sổ trượt `metrics_window_seconds` (mặc định 300s), loại `skipped` khỏi throughput/error-rate (chưa từng qua claim). `GET /api/v1/metrics` (`api/routes_metrics.py`) trả qua envelope `ok(meta=...)` — JSON thường, không thêm `prometheus_client` (ngoài phạm vi/stack hiện tại).
+- **Backup (AC #4)**: `deploy/backup.sh` — `pg_dump -Fc` toàn DB (phủ luôn `scene_embedding`/FTS vì cùng Postgres instance) + `tar` media gốc loại trừ `*/keyframes/*` (derived). `deploy/README.md` thêm mục Backup (chạy thủ công/cron ngoài host, ghi chú phục hồi `pg_restore`/giải nén tar).
+- **Vá hạ tầng carried-over**: `deploy/docker-compose.yml` — đổi mount Postgres `pgdata:/var/lib/postgresql` → `pgdata:/var/lib/postgresql/data` (PGDATA chuẩn, item đã defer từ code review trước).
+- ⚠️ `task_lease_seconds=900`, `task_max_attempts=3`, `metrics_window_seconds=300` là `[ASSUMPTION]` — không có số cụ thể trong PRD/epics; `task_lease_seconds` cần tăng nếu sau này các stage nặng (detect/enrich/describe/embed) được wire vào cùng hàng đợi `ingest_task` (hiện chưa — ngoài phạm vi story này).
+- ⚠️ NFR-1 (thông lượng ≥2x realtime/GPU) không đo được bằng test tự động ở story này — model server thật chưa kết nối môi trường dev (Story 1.4-1.6 vẫn guarded); metrics endpoint chỉ đảm bảo con số đo được/lộ ra.
+- `finalize_job` giữ nguyên hành vi hiện có (job → `done` bất kể có task `error`, không có job-status "failed") — chủ ý không sửa, đã ghi rõ trong Dev Notes.
+- **Code review (5 patch áp dụng)**: (1) `reclaim_stale_tasks` trả thêm `job_ids` (mọi task bị đụng, cả requeue lẫn expire) — `drain()` seed tập finalize từ đó, sửa bug job kẹt `"running"` vĩnh viễn khi task cuối cùng bị reclaim expire (đúng bug mà story này lẽ ra phải đóng); (2) `ingest_throughput_per_min` sửa chỉ đếm task `done`, không gồm `error` (khớp nguyên văn AC #1); (3) 3 setting mới (`task_lease_seconds`/`task_max_attempts`/`metrics_window_seconds`) thêm `Field(gt=0)` chặn `ZeroDivisionError`; (4) `enqueue_batch` reset `attempts`/`claimed_at`/`finished_at` khi requeue task `skipped`/`error` cũ — tránh task đã hết lượt thử bị re-expire ngay ở lượt nạp lại mới; (5) `deploy/backup.sh` thêm bit thực thi + ghi chú `PGPASSWORD`, `deploy/README.md` thêm cảnh báo nâng cấp volume `pgdata`. 6 defer ghi vào `deferred-work.md` (fencing/heartbeat cho lease, không giới hạn batch reclaim, thiếu index metrics, backup không chống chạy chồng/không verify toàn vẹn, `skip_locked=False` không thật sự chờ khoá — pre-existing pattern từ Story 1.2). 5 finding khác dismiss (đã caveat sẵn trong Dev Notes hoặc không phải deviation thật).
+
+### File List
+
+- **Mới**: `migrations/versions/0007_ingest_task_lease_metrics.py`, `pipeline/metrics.py`, `api/routes_metrics.py`, `deploy/backup.sh`, `tests/test_ingest_reclaim.py`, `tests/test_metrics.py`
+- **Sửa**: `shared/models.py` (cột `claimed_at`/`attempts`/`finished_at` trên `IngestTask`), `shared/config.py` (`task_lease_seconds`, `task_max_attempts`, `metrics_window_seconds` + `Field(gt=0)`), `pipeline/ingest.py` (`claim_next_task` set claimed_at/attempts, hàm mới `reclaim_stale_tasks` trả `job_ids`, `enqueue_batch` reset lease fields khi requeue), `pipeline/workers.py` (`process_task` set `finished_at`, `drain()` gọi reclaim + seed job_ids từ kết quả reclaim), `pipeline/worker_main.py` (docstring), `pipeline/metrics.py` (throughput chỉ đếm `done`), `api/main.py` (đăng ký `metrics_router`), `deploy/docker-compose.yml` (fix mount `pgdata`), `deploy/README.md` (mục Backup + ghi chú nâng cấp/PGPASSWORD), `deploy/backup.sh` (bit thực thi + ghi chú PGPASSWORD), `tests/test_config.py` (test validate settings mới)
+
+## Change Log
+
+- 2026-07-03 — Story 1.7: metrics endpoint (`/api/v1/metrics` — queue_depth/throughput/error-rate), crash-recovery lease/reclaim cho `ingest_task` (worker crash → requeue, không mất việc), backup script (Postgres pg_dump + media gốc loại trừ derived), fix mount `pgdata` (carried-over từ code review Story 1.5/1.6). 77/77 test pass, ruff clean.
+- 2026-07-03 — Code review: 5 patch áp dụng (job kẹt "running" khi task cuối reclaim-expire, throughput tính nhầm task error, ZeroDivisionError khi window=0, enqueue_batch không reset lease/attempts khi requeue, vài gap vận hành backup/docker) + 6 test mới. 83/83 test pass, ruff clean. 6 finding defer, 5 dismiss.

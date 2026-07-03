@@ -2,13 +2,18 @@
 
 Story 1.2: process_task đăng ký Video (idempotent). drain() nối orchestrator: xử hết
 hàng đợi rồi finalize job (AD-18) — wiring runtime thật, không chỉ trong test.
+Story 1.7 (NFR-2): drain() reclaim task 'claimed' quá lease (worker crash) trước khi
+xử hàng đợi — task cứu được có thể claim lại ngay trong cùng lượt drain().
 """
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pipeline.ingest import claim_next_task, finalize_job
+from pipeline.ingest import claim_next_task, finalize_job, reclaim_stale_tasks
+from shared.config import get_settings
 from shared.ids import new_video_id
 from shared.models import IngestTask, Video
 
@@ -18,6 +23,7 @@ async def process_task(session: AsyncSession, task: IngestTask) -> None:
     try:
         if task.video_id is not None:  # đã xử lý trước đó
             task.status = "done"
+            task.finished_at = datetime.now(timezone.utc)
             await session.flush()
             return
         existing = (
@@ -31,10 +37,12 @@ async def process_task(session: AsyncSession, task: IngestTask) -> None:
             task.video_id = vid
         task.status = "done"
         task.reason = None
+        task.finished_at = datetime.now(timezone.utc)
         await session.flush()
     except Exception as exc:  # noqa: BLE001 - lỗi task không được làm sập worker
         task.status = "error"
         task.reason = str(exc)[:256]
+        task.finished_at = datetime.now(timezone.utc)
         try:
             await session.flush()
         except Exception:  # noqa: BLE001
@@ -51,8 +59,22 @@ async def run_once(session: AsyncSession, *, skip_locked: bool = True) -> bool:
 
 
 async def drain(session: AsyncSession, *, skip_locked: bool = True) -> dict:
-    """Xử hết task queued rồi finalize các job bị ảnh hưởng (orchestrator wiring, AD-18)."""
-    job_ids: set[str] = set()
+    """Xử hết task queued rồi finalize các job bị ảnh hưởng (orchestrator wiring, AD-18).
+
+    Reclaim task 'claimed' quá lease trước (worker crash, NFR-2) — task cứu được về
+    'queued' có thể bị claim lại ngay trong cùng lượt drain() này. Job của task bị
+    reclaim expire (hết task_max_attempts) không bao giờ được claim lại nữa, nên
+    job_id của nó phải được đưa vào tập finalize ngay từ đây (không thể chỉ dựa vào
+    vòng claim bên dưới — nếu không job sẽ kẹt 'running' vĩnh viễn).
+    """
+    settings = get_settings()
+    reclaim_result = await reclaim_stale_tasks(
+        session,
+        lease_seconds=settings.task_lease_seconds,
+        max_attempts=settings.task_max_attempts,
+        skip_locked=skip_locked,
+    )
+    job_ids: set[str] = set(reclaim_result["job_ids"])
     processed = 0
     while True:
         task = await claim_next_task(session, skip_locked=skip_locked)

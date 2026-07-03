@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # BGE-M3 dense embedding dim (Story 1.6) — [ASSUMPTION: xác nhận lại khi chạy model thật]
@@ -137,4 +137,10 @@ class IngestTask(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     video_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Crash-recovery (Story 1.7, NFR-2/AD-18): thời điểm claim gần nhất; None nếu chưa claim/đã requeue
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Số lần claim (kể cả lần đầu) — dùng để giới hạn số lần requeue trước khi coi là lỗi vĩnh viễn
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Thời điểm chuyển 'done'/'error' — dùng tính ingest_throughput_per_min/job_error_rate (NFR-8)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

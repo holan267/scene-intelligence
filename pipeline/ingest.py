@@ -6,6 +6,8 @@
 - enqueue_batch: tạo Job + Task, dedupe; task skipped/error được RE-QUEUE khi nạp lại
   (lỗi tạm thời không thành bỏ-qua-vĩnh-viễn).
 - claim_next_task: SKIP LOCKED (Postgres), có tiebreaker; finalize_job: orchestrator (AD-18).
+- reclaim_stale_tasks (Story 1.7, NFR-2): orchestrator requeue/expire task 'claimed' quá lease
+  khi worker crash — không mất việc (xem pipeline/workers.py::drain, gọi mỗi vòng lặp).
 
 Ghi chú (defer): `existing` nạp toàn bộ source_key vào bộ nhớ (chưa bound); an toàn cạnh
 tranh đa tiến trình cần INSERT ON CONFLICT — xem deferred-work.md.
@@ -13,6 +15,7 @@ tranh đa tiến trình cần INSERT ON CONFLICT — xem deferred-work.md.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -95,6 +98,11 @@ async def enqueue_batch(
         readable = p.is_file() and _readable(p)
         if existing is not None:  # re-queue task cũ skipped/error
             existing.job_id = job.job_id
+            # Lượt nạp mới -> reset lease/attempts (Story 1.7): nếu không, task đã hết
+            # task_max_attempts ở lượt trước bị reclaim expire ngay ở lần crash đầu của lượt này.
+            existing.claimed_at = None
+            existing.attempts = 0
+            existing.finished_at = None
             if readable:
                 existing.status, existing.reason = "queued", None
                 queued += 1
@@ -154,6 +162,8 @@ async def claim_next_task(session: AsyncSession, *, skip_locked: bool = True) ->
     if task is None:
         return None
     task.status = "claimed"
+    task.claimed_at = datetime.now(timezone.utc)
+    task.attempts = (task.attempts or 0) + 1
     await session.flush()
     return task
 
@@ -166,3 +176,36 @@ async def finalize_job(session: AsyncSession, job_id: str) -> None:
         if job is not None:
             job.status = "done"
             await session.flush()
+
+
+async def reclaim_stale_tasks(
+    session: AsyncSession, *, lease_seconds: int, max_attempts: int, skip_locked: bool = True
+) -> dict:
+    """Orchestrator (AD-18): requeue/expire task 'claimed' quá lease (worker crash, NFR-2).
+
+    Task còn dưới `max_attempts` -> về 'queued' để worker khác claim lại (không mất việc).
+    Task đã hết lượt thử -> 'error' (reason=lease_timeout_exceeded), không kẹt vĩnh viễn.
+    Trả về `job_ids` của MỌI task bị đụng (requeue lẫn expire) để caller (drain()) finalize
+    đúng job — nhánh expire không bao giờ được claim lại nên job của nó phải được finalize
+    ngay từ đây, không đợi vòng claim sau.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
+    q = select(IngestTask).where(IngestTask.status == "claimed", IngestTask.claimed_at < cutoff)
+    if skip_locked:
+        q = q.with_for_update(skip_locked=True)
+    stale = (await session.execute(q)).scalars().all()
+
+    requeued = expired = 0
+    job_ids: set[str] = set()
+    for task in stale:
+        job_ids.add(task.job_id)
+        if task.attempts < max_attempts:
+            task.status, task.claimed_at = "queued", None
+            requeued += 1
+        else:
+            task.status = "error"
+            task.reason = "lease_timeout_exceeded"
+            task.finished_at = datetime.now(timezone.utc)
+            expired += 1
+    await session.flush()
+    return {"requeued": requeued, "expired": expired, "job_ids": job_ids}
