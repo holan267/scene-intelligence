@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import func, select
 
 from pipeline.ingest import (
@@ -7,8 +8,9 @@ from pipeline.ingest import (
     enqueue_batch,
     finalize_job,
     job_progress,
+    resolve_source_dir,
 )
-from pipeline.workers import run_once
+from pipeline.workers import drain, run_once
 from shared.models import Video
 
 
@@ -69,3 +71,42 @@ def test_ingest_routes_registered():
     paths = set(create_app().openapi()["paths"].keys())
     assert "/api/v1/ingest" in paths
     assert "/api/v1/jobs/{job_id}" in paths
+
+
+async def test_skipped_task_requeued_on_retry(tmp_path, async_session):
+    # Patch: lỗi tạm thời (file thiếu) không thành bỏ-qua-vĩnh-viễn
+    f = tmp_path / "a.mp4"  # chưa tạo -> skipped
+    res1 = await enqueue_batch(async_session, [f], tmp_path)
+    assert res1["invalid"] == 1
+    f.write_bytes(b"x")  # file xuất hiện sau
+    res2 = await enqueue_batch(async_session, [f], tmp_path)
+    assert res2["queued"] == 1 and res2["duplicates"] == 0
+
+
+async def test_drain_finalizes_job(tmp_path, async_session):
+    # Patch: finalize_job được wire qua drain -> job về done
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    job = await enqueue_batch(async_session, discover_videos(tmp_path), tmp_path)
+    result = await drain(async_session, skip_locked=False)
+    assert result["processed"] == 1 and result["jobs_finalized"] == 1
+    prog = await job_progress(async_session, job["job_id"])
+    assert prog["status"] == "done" and prog["done"] == 1
+
+
+async def test_reingest_same_file_no_duplicate_video(tmp_path, async_session):
+    # Patch: process_task idempotent -> không đúc Video trùng
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    await enqueue_batch(async_session, discover_videos(tmp_path), tmp_path)
+    await drain(async_session, skip_locked=False)
+    await enqueue_batch(async_session, discover_videos(tmp_path), tmp_path)
+    await drain(async_session, skip_locked=False)
+    n = (await async_session.execute(select(func.count()).select_from(Video))).scalar_one()
+    assert n == 1
+
+
+def test_resolve_source_dir_rejects_outside_media_root(tmp_path):
+    # D1: nguồn ngoài MEDIA_ROOT bị từ chối
+    root = tmp_path / "media"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        resolve_source_dir(tmp_path, root)  # tmp_path là cha của root -> ngoài root

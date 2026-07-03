@@ -50,9 +50,9 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
   # Epic 1 — Nền tảng & Nạp kho làm giàu
   epic-1: in-progress
-  1-1-scaffold-nen-tang-xuong-song-3-kho: review
-  1-2-nap-video-theo-lo-qua-hang-doi-co-tien-do: review
-  1-3-tach-scene-shot-keyframe: backlog
+  1-1-scaffold-nen-tang-xuong-song-3-kho: done
+  1-2-nap-video-theo-lo-qua-hang-doi-co-tien-do: done
+  1-3-tach-scene-shot-keyframe: done
   1-4-lam-giau-tieng-viet-asr-ocr: backlog
   1-5-lam-giau-thi-giac-khuon-mat-doi-tuong: backlog
   1-6-scene-document-embedding-siet-nhieu-cong-index: backlog

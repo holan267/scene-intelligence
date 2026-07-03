@@ -8,7 +8,8 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.envelope import ok
-from pipeline.ingest import discover_videos, enqueue_batch, job_progress
+from pipeline.ingest import discover_videos, enqueue_batch, job_progress, resolve_source_dir
+from shared.config import get_settings
 from shared.db import get_session
 
 router = APIRouter(prefix="/api/v1")
@@ -18,10 +19,14 @@ class IngestRequest(BaseModel):
     source_dir: str
 
 
-@router.post("/ingest")
+@router.post("/ingest", responses={400: {"description": "source_dir không hợp lệ"}})
 async def ingest(req: IngestRequest, session: Annotated[AsyncSession, Depends(get_session)]) -> dict:
-    paths = discover_videos(req.source_dir)
-    result = await enqueue_batch(session, paths, req.source_dir)
+    media_root = get_settings().media_root
+    try:  # D1: giới hạn trong MEDIA_ROOT + P2.6: báo lỗi nếu dir sai/thiếu
+        source_dir = resolve_source_dir(req.source_dir, media_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = await enqueue_batch(session, discover_videos(source_dir), media_root)
     await session.commit()
     return ok(meta=result)
 

@@ -1,17 +1,19 @@
 """API Gateway — ranh giới cứng UI<->lõi (AD-13, AD-14).
 
-Prefix /api/v1, envelope chuẩn. Story 1.1 chỉ cần endpoint health kiểm tra 3 kho.
-Các endpoint ingest/search thêm ở story sau (AD-2 tách write/read).
+Prefix /api/v1, envelope chuẩn, error-shape chung. Story 1.1: health kiểm tra 3 kho.
 """
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from api.envelope import ok
+from api.envelope import err, ok
 from api.routes_ingest import router as ingest_router
 from shared.db import check_db
+from shared.logging import configure_logging
 from shared.storage import build_storage
 
 
@@ -21,13 +23,15 @@ async def db_health() -> bool:
 
 
 def storage_health() -> bool:
-    """Dependency: storage-port media khả dụng? (override trong test)."""
-    store = build_storage()
-    check = getattr(store, "healthcheck", None)
-    return bool(check()) if callable(check) else True
+    """Dependency: storage-port media ghi được? Không ném lỗi -> health luôn báo được trạng thái."""
+    try:
+        return bool(build_storage().healthcheck())
+    except Exception:  # noqa: BLE001 - health không được ném ra 500
+        return False
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title="Scene Intelligence", version="0.1.0")
     v1 = APIRouter(prefix="/api/v1")
 
@@ -36,12 +40,13 @@ def create_app() -> FastAPI:
         db_ok: Annotated[bool, Depends(db_health)],
         store_ok: Annotated[bool, Depends(storage_health)],
     ) -> dict:
-        return ok(
-            meta={
-                "status": "ok",
-                "stores": {"postgres": db_ok, "media_storage": store_ok},
-            }
-        )
+        status = "ok" if (db_ok and store_ok) else "degraded"
+        return ok(meta={"status": status, "stores": {"postgres": db_ok, "media_storage": store_ok}})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exc_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Bọc lỗi theo error-shape chung (AD-13) thay vì {detail}
+        return JSONResponse(status_code=exc.status_code, content=err(str(exc.status_code), exc.detail))
 
     app.include_router(v1)
     app.include_router(ingest_router)

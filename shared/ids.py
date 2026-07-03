@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import uuid
 
-# Namespace cố định cho scene_id tất định (không đổi -> id ổn định qua re-ingest).
+# Namespace cố định cho id tất định (không đổi -> id ổn định qua re-ingest).
 _SCENE_NS = uuid.UUID("6f6b1e7a-6c2a-4b8e-9d3a-2c1b0a9f8e7d")
+_SHOT_NS = uuid.UUID("b2d4a1c8-3e5f-4a7b-8c9d-0e1f2a3b4c5d")
 
 
 def new_id() -> str:
@@ -31,6 +32,13 @@ def scene_id(video_id: str, start_ms: int, end_ms: int) -> str:
     if not isinstance(start_ms, int) or not isinstance(end_ms, int):
         raise TypeError("start_ms/end_ms phải là int millisecond (AD-12)")
     return uuid.uuid5(_SCENE_NS, f"{video_id}:{start_ms}:{end_ms}").hex
+
+
+def shot_id(scene_id_value: str, start_ms: int, end_ms: int) -> str:
+    """shot_id tất định & bất biến từ (scene_id, start_ms, end_ms) — AD-1."""
+    if not isinstance(start_ms, int) or not isinstance(end_ms, int):
+        raise TypeError("start_ms/end_ms phải là int millisecond (AD-12)")
+    return uuid.uuid5(_SHOT_NS, f"{scene_id_value}:{start_ms}:{end_ms}").hex
 
 
 def ms_to_smpte(ms: int, fps: float) -> str:

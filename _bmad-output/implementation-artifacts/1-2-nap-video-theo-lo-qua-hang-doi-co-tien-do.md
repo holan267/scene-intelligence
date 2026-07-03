@@ -4,7 +4,7 @@ baseline_commit: NO_VCS
 
 # Story 1.2: Nạp video theo lô qua hàng đợi có tiến độ
 
-Status: review
+Status: done
 
 ## Story
 
@@ -73,3 +73,16 @@ claude-opus-4-8[1m] (BMad dev-story)
 ## Change Log
 
 - 2026-07-03 — Story 1.2: hàng đợi ingest Postgres-backed + API nạp lô/tiến độ + worker đăng ký Video.
+
+## Review Findings (code review 2026-07-03)
+
+- [x] [Review][Decision→Patch] **Danh tính & phạm vi ingest**: ĐÃ patch — giới hạn ingest trong `MEDIA_ROOT` (`resolve_source_dir`, 400 nếu ngoài/thiếu), `source_key` = path tương-đối-`MEDIA_ROOT`, requeue task skipped/error [pipeline/ingest.py, api/routes_ingest.py]
+- [x] [Review][Patch] `finalize_job` chỉ được gọi trong test — chưa wire vào runtime + thiếu worker driver loop → job kẹt `running` mãi (AD-18/AC-2/AC-4) [pipeline/ingest.py, workers.py]
+- [x] [Review][Patch] `process_task` try/except bọc thiếu `flush` (flush ngoài try) → lỗi DB làm sập worker thay vì đánh dấu task `error` [pipeline/workers.py]
+- [x] [Review][Patch] `process_task` không idempotent: re-claim đúc Video trùng (`Video.source_key` thiếu UNIQUE, không guard `task.video_id` đã set) [pipeline/workers.py, shared/models.py]
+- [x] [Review][Patch] Task `skipped`/`error` chiếm khoá `source_key` vĩnh viễn → lỗi tạm thời thành bỏ-qua-vĩnh-viễn; dedupe nên loại trạng thái skipped/error [pipeline/ingest.py]
+- [x] [Review][Patch→Defer] `enqueue_batch` an toàn cạnh tranh đa tiến trình: đã giảm va chạm bằng lookup+requeue trong-tiến-trình; DEFER phần `INSERT ON CONFLICT`/savepoint (dialect-specific) sang deferred-work.md [pipeline/ingest.py]
+- [x] [Review][Patch] `source_dir` sai/không tồn tại → 200 `queued:0` job `done`, không báo lỗi cho thủ thư [pipeline/ingest.py, api/routes_ingest.py]
+- [x] [Review][Patch] Task cùng batch có `created_at` bằng nhau (now() theo transaction) → thứ tự claim không xác định; thêm tiebreaker [pipeline/ingest.py]
+- [x] [Review][Defer] Task kẹt `claimed` khi worker crash (thiếu lease/timeout/reclaim) → job không finalize — thuộc hardening vận hành (gần Story 1.7)
+- [x] [Review][Defer] I/O đồng bộ chặn event loop (`rglob`, `_readable`, `extract`, `put`) → nghẽn request khi quét kho lớn — cần threadpool/executor

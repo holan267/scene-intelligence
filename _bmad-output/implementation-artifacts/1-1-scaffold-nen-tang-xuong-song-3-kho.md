@@ -4,7 +4,7 @@ baseline_commit: NO_VCS
 
 # Story 1.1: Scaffold nền tảng & xương sống 3 kho
 
-Status: review
+Status: done
 
 ## Story
 
@@ -119,3 +119,11 @@ claude-opus-4-8[1m] (BMad dev-story)
 ## Change Log
 
 - 2026-07-03 — Story 1.1 implemented: scaffold + xương sống 3 kho (Postgres/pgvector, storage-port filesystem, model-server slot), FastAPI health, migration base schema, Docker Compose. 13 tests pass, ruff clean. Status → review.
+
+## Review Findings (code review 2026-07-03)
+
+- [x] [Review][Patch] Health checks không đáng tin: `storage_health` ném lỗi→500 thay vì `False`; `FilesystemStorage.__init__` `mkdir` che NAS chưa mount + không kiểm ghi; `meta.status` hardcode `"ok"`; default `True` khi adapter thiếu `healthcheck` [api/main.py, shared/storage.py]
+- [x] [Review][Patch] Lỗi API không theo envelope AD-13: `err()` không dùng, `HTTPException(404)` trả `{detail}` — cần exception handler bọc `{error:{code,message,detail}}` [api/routes_ingest.py]
+- [x] [Review][Patch] "Structured JSON logging" (Task 3) đánh done nhưng chưa hiện thực (không có cấu hình log nào)
+- [x] [Review][Patch] `deploy/Dockerfile` hardcode danh sách deps → drift khỏi `pyproject.toml`; nên cài từ pyproject
+- [x] [Review][Defer] `pgdata` mount `/var/lib/postgresql` thay vì `/var/lib/postgresql/data` — bạn đã sửa thủ công; khuyến nghị dùng `/data` để volume persist đúng [deploy/docker-compose.yml]

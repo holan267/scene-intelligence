@@ -5,9 +5,9 @@ WORKDIR /app
 # uv để cài phụ thuộc nhanh, đóng băng theo pyproject
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
-RUN uv pip install --system fastapi "uvicorn[standard]" pydantic-settings \
-    "sqlalchemy[asyncio]" "psycopg[binary]" alembic
+# Cài phụ thuộc TỪ pyproject (không hardcode -> không drift)
+COPY pyproject.toml uv.lock* ./
+RUN uv pip install --system .
 
 COPY . .
 
