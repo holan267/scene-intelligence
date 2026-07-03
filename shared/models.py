@@ -41,9 +41,39 @@ class Scene(Base):
     # Làm giàu tiếng Việt (Story 1.4, AD-5 cột riêng): điền bởi stage ASR/OCR
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # ASR (AD-9)
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # OCR (AD-9)
+    # Làm giàu thị giác (Story 1.5, AD-5 cột riêng của stage object): JSON list [{label, confidence}]
+    objects: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped[Video] = relationship(back_populates="scenes")
+
+
+class Person(Base):
+    """Registry danh tính đã đăng ký (MC, chính khách…) cho face-match (Story 1.5, AD-11)."""
+
+    __tablename__ = "person"
+
+    person_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    # JSON list[float] — face embedding tham chiếu để so cosine similarity (không pgvector ở story này)
+    reference_embedding: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FaceAppearance(Base):
+    """Một khuôn mặt phát hiện trên Scene, khớp (hoặc không) với Person đã đăng ký (AD-11).
+
+    Bảng riêng của stage face (không phải cột JSONB dùng chung trên Scene — AD-5).
+    """
+
+    __tablename__ = "face_appearance"
+
+    appearance_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scene.scene_id"), nullable=False, index=True)
+    # None = "không xác định" (confidence < ngưỡng hoặc không khớp ai đã đăng ký — AD-11)
+    person_id: Mapped[str | None] = mapped_column(ForeignKey("person.person_id"), nullable=True, index=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Shot(Base):
