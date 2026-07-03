@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# BGE-M3 dense embedding dim (Story 1.6) — [ASSUMPTION: xác nhận lại khi chạy model thật]
+SCENE_EMBEDDING_DIM = 1024
 
 
 class Base(DeclarativeBase):
@@ -43,6 +47,8 @@ class Scene(Base):
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # OCR (AD-9)
     # Làm giàu thị giác (Story 1.5, AD-5 cột riêng của stage object): JSON list [{label, confidence}]
     objects: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Scene Document NL (Story 1.6, Qwen3-VL) — SoT (AD-4), cột riêng của stage describe (AD-5)
+    scene_document: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped[Video] = relationship(back_populates="scenes")
@@ -88,6 +94,24 @@ class Shot(Base):
     end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     keyframe_key: Mapped[str | None] = mapped_column(String(512), nullable=True)  # media-key (AD-23)
     phash: Mapped[str | None] = mapped_column(String(64), nullable=True)  # perceptual hash hex (AD-6)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SceneEmbedding(Base):
+    """Đúng một dòng/Scene: scene_embedding (BGE-M3, pgvector) + text nguồn cho FTS (Story 1.6, AD-7).
+
+    Dẫn xuất, dựng lại được 100% từ `Scene.scene_document` (AD-4). `fts_text` là Text thuần —
+    KHÔNG dùng `sqlalchemy.dialects.postgresql.TSVECTOR` (raise CompileError trên sqlite, vỡ
+    fixture test dùng chung `Base.metadata.create_all`); Story 2.2 sẽ tsvector-hoá cột này.
+    """
+
+    __tablename__ = "scene_embedding"
+
+    scene_id: Mapped[str] = mapped_column(ForeignKey("scene.scene_id"), primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(SCENE_EMBEDDING_DIM), nullable=False)
+    fts_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # sha256(scene_document) tại thời điểm embed — freshness check (AD-16), Search Service đọc ở Epic 2
+    doc_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

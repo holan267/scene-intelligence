@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     media_backend: str = "filesystem"
     media_root: str = "./_data/media"
     api_env: str = "dev"
+    # Model servers (vLLM/embedder, AD-14) — endpoint OpenAI-compatible (Story 1.6)
+    describe_model_url: str = "http://localhost:8001"
+    embed_model_url: str = "http://localhost:8002"
 
 
 @lru_cache
