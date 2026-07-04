@@ -32,3 +32,20 @@ def test_zero_or_negative_rejected(field):
     # Review fix: gt=0 chặn ZeroDivisionError ở collect_metrics()/reclaim_stale_tasks()
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: 0})
+
+
+def test_search_settings_defaults():
+    s = Settings(_env_file=None)
+    assert s.search_pool_size == 20
+    assert s.rerank_skip_gap == 0.15
+
+
+def test_search_pool_size_zero_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, search_pool_size=0)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1])
+def test_rerank_skip_gap_out_of_range_rejected(value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, rerank_skip_gap=value)

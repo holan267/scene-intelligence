@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.envelope import err, ok
 from api.routes_ingest import router as ingest_router
 from api.routes_metrics import router as metrics_router
+from api.routes_search import router as search_router
 from shared.db import check_db
 from shared.logging import configure_logging
 from shared.storage import build_storage
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(v1)
     app.include_router(ingest_router)
     app.include_router(metrics_router)
+    app.include_router(search_router)
     return app
 
 

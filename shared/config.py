@@ -20,12 +20,16 @@ class Settings(BaseSettings):
     # Model servers (vLLM/embedder, AD-14) — endpoint OpenAI-compatible (Story 1.6)
     describe_model_url: str = "http://localhost:8001"
     embed_model_url: str = "http://localhost:8002"
+    rerank_model_url: str = "http://localhost:8003"
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)
     task_max_attempts: int = Field(default=3, gt=0)
     # Metrics (Story 1.7, NFR-8): [ASSUMPTION] cửa sổ trượt 5 phút cho throughput/error-rate
     # gt=0 -> chặn ZeroDivisionError ở collect_metrics() khi cấu hình sai
     metrics_window_seconds: int = Field(default=300, gt=0)
+    # Search (Story 2.1, AD-8): [ASSUMPTION] pool ANN trước lọc/rerank, ngưỡng bỏ rerank
+    search_pool_size: int = Field(default=20, gt=0)
+    rerank_skip_gap: float = Field(default=0.15, ge=0.0, le=1.0)
 
 
 @lru_cache

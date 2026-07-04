@@ -1,5 +1,13 @@
 # Deferred Work
 
+## Deferred from: code review of story-2.1 (2026-07-04)
+
+- **Pool ANN cạn không có tín hiệu/widen-retry** [search/service.py, search/candidates.py] — `search_pool_size` cố định (mặc định 20); nếu `filter_fresh_candidates` lọc bớt nhiều (burst re-describe) hoặc `limit` yêu cầu lớn hơn pool, caller nhận ít hơn `limit` kết quả mà không có tín hiệu phân biệt "hết cảnh liên quan" với "pool quá nhỏ". *(Defer: cần thiết kế widen/retry hoặc adaptive pool size khi có bằng chứng thực tế về tần suất.)*
+- **Không có HTTP client dùng chung/tái sử dụng connection** [search/query_embed.py, search/rerank.py, api/routes_search.py] — mỗi request dựng adapter mới; patch chuyển sang async client (xem story 2.1) cải thiện một phần (không còn chặn event loop) nhưng chưa giải quyết connection pooling thật. *(Defer: tối ưu hiệu năng, cần thiết kế lifecycle client cấp app.)*
+- **Không có health-check khởi động cho `rerank_model_url`** [shared/config.py, api/main.py] — cùng khoảng trống có sẵn từ `describe_model_url`/`embed_model_url` (Story 1.6), không phải gap mới. *(Defer: pre-existing, ngoài phạm vi story 2.1.)*
+- **`zip(..., strict=True)` trong `maybe_rerank` raise `ValueError` không xử lý cho implementation `Reranker` khác trả sai độ dài** [search/rank.py] — `BgeRerankerV2M3` hiện tại đã tự validate nên không chạm nhánh này; chỉ là rủi ro giả thuyết trên implementation chưa tồn tại. *(Defer: xử lý khi có implementation thứ hai thật.)*
+- **`search_pool_size`/`rerank_skip_gap` là `[ASSUMPTION]` chưa có eval/observability để tinh chỉnh** [shared/config.py] — cùng pattern các tham số `[ASSUMPTION]` khác (`ratio_threshold`, `confidence_threshold` Story 1.6; `task_lease_seconds` Story 1.7). *(Defer: tinh chỉnh khi có Eval set — Epic 4.)*
+
 ## Deferred from: code review of story-1.7 (2026-07-03)
 
 - **`skip_locked=False` không thực sự "chờ khoá"** [pipeline/ingest.py] — chỉ bỏ khoá hoàn toàn (`with_for_update` không được gọi), tên tham số gây hiểu nhầm là sẽ blocking-lock. Đây là pattern có sẵn từ `claim_next_task` (Story 1.2), `reclaim_stale_tasks` chỉ theo đúng convention đó. *(Defer: đổi tên/ngữ nghĩa tham số ảnh hưởng cả API hiện có, ngoài phạm vi story này.)*

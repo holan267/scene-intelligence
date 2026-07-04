@@ -7,21 +7,16 @@ chạm search_status, giữ nguyên trạng thái cũ (AD-17). Model thật ở 
 """
 from __future__ import annotations
 
-import hashlib
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.models import Scene, SceneEmbedding
+from shared.versioning import doc_version
 
 
 class TextEmbedder(Protocol):
     def embed(self, text: str) -> list[float]: ...
-
-
-def doc_version(scene_document: str) -> str:
-    """Checksum sha256 của scene_document — freshness của derived-artifact (AD-16)."""
-    return hashlib.sha256(scene_document.encode()).hexdigest()
 
 
 async def index_scene(session: AsyncSession, scene_id: str, embedder: TextEmbedder) -> dict:
