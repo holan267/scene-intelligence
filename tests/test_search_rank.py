@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from search.rank import build_envelope, filter_fresh_candidates, maybe_rerank, normalize_ann_score
+from search.rank import build_envelope, filter_fresh_candidates, maybe_rerank, normalize_rrf_score
 from shared.versioning import doc_version
 
 
@@ -17,8 +17,8 @@ class FakeReranker:
         return self._scores if self._scores is not None else [0.5] * len(passages)
 
 
-def _candidate(scene_id: str, *, scene_document="doc", distance=0.1, video_id="v1",
-               start_ms=0, end_ms=1000, doc_version_override=None) -> dict:
+def _candidate(scene_id: str, *, scene_document="doc", rrf_score=0.01, video_id="v1",
+               start_ms=0, end_ms=1000, doc_version_override=None, fts_snippet=None) -> dict:
     return {
         "scene_id": scene_id,
         "video_id": video_id,
@@ -26,7 +26,8 @@ def _candidate(scene_id: str, *, scene_document="doc", distance=0.1, video_id="v
         "end_ms": end_ms,
         "scene_document": scene_document,
         "doc_version": doc_version_override if doc_version_override is not None else doc_version(scene_document),
-        "ann_distance": distance,
+        "rrf_score": rrf_score,
+        "fts_snippet": fts_snippet,
     }
 
 
@@ -44,44 +45,46 @@ def test_filter_fresh_candidates_drops_none_scene_document():
     assert result == []
 
 
-def test_normalize_ann_score_clamps_0_1():
-    assert normalize_ann_score(0.0) == 1.0
-    assert normalize_ann_score(1.0) == 0.0
-    assert normalize_ann_score(-0.5) == 1.0  # clamp trên
-    assert normalize_ann_score(2.0) == 0.0  # clamp dưới
+def test_normalize_rrf_score_clamps_0_1():
+    k = 60
+    max_score = 2.0 / (k + 1)
+    assert normalize_rrf_score(max_score, k=k) == 1.0
+    assert normalize_rrf_score(0.0, k=k) == 0.0
+    assert normalize_rrf_score(-1.0, k=k) == 0.0  # clamp dưới
+    assert normalize_rrf_score(max_score * 2, k=k) == 1.0  # clamp trên
 
 
-def test_normalize_ann_score_nan_and_inf_return_zero():
+def test_normalize_rrf_score_nan_and_inf_return_zero():
     # Review fix: NaN/inf không được lọt qua min/max thành điểm "hoàn hảo" âm thầm
-    assert normalize_ann_score(float("nan")) == 0.0
-    assert normalize_ann_score(float("inf")) == 0.0
-    assert normalize_ann_score(float("-inf")) == 0.0
+    assert normalize_rrf_score(float("nan"), k=60) == 0.0
+    assert normalize_rrf_score(float("inf"), k=60) == 0.0
+    assert normalize_rrf_score(float("-inf"), k=60) == 0.0
 
 
 async def test_maybe_rerank_skips_when_gap_large():
-    candidates = [_candidate("s1", distance=0.0), _candidate("s2", distance=0.5)]
+    candidates = [_candidate("s1", rrf_score=2.0 / 61), _candidate("s2", rrf_score=1.0 / 200)]
     reranker = FakeReranker()
-    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15)
+    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15, k=60)
     assert reranker.calls == 0  # bỏ qua rerank
     assert [c["scene_id"] for c in result] == ["s1", "s2"]
-    assert result[0]["score"] == 1.0
+    assert result[0]["score"] == normalize_rrf_score(2.0 / 61, k=60)
 
 
 async def test_maybe_rerank_calls_reranker_when_gap_small_and_resorts():
-    candidates = [_candidate("s1", distance=0.1), _candidate("s2", distance=0.12)]
+    candidates = [_candidate("s1", rrf_score=1.0 / 61), _candidate("s2", rrf_score=1.0 / 62)]
     reranker = FakeReranker(scores=[0.2, 0.9])  # đảo thứ tự
-    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15)
+    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15, k=60)
     assert reranker.calls == 1
     assert [c["scene_id"] for c in result] == ["s2", "s1"]
     assert result[0]["score"] == 0.9
 
 
 async def test_maybe_rerank_skips_for_single_candidate():
-    candidates = [_candidate("s1", distance=0.2)]
+    candidates = [_candidate("s1", rrf_score=1.0 / 61)]
     reranker = FakeReranker()
-    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15)
+    result = await maybe_rerank(candidates, reranker, "query", gap_threshold=0.15, k=60)
     assert reranker.calls == 0
-    assert result[0]["score"] == normalize_ann_score(0.2)
+    assert result[0]["score"] == normalize_rrf_score(1.0 / 61, k=60)
 
 
 def test_build_envelope_shape_and_limit():
@@ -102,3 +105,15 @@ def test_build_envelope_shape_and_limit():
         "highlights": [],
     }
     assert meta == {"next_cursor": None, "count": 2}
+
+
+def test_build_envelope_highlights_from_fts_snippet():
+    ranked = [{**_candidate("s1", fts_snippet="**World Cup**"), "score": 0.9}]
+    results, _ = build_envelope(ranked, limit=10)
+    assert results[0]["highlights"] == ["**World Cup**"]
+
+
+def test_build_envelope_highlights_empty_when_no_snippet():
+    ranked = [{**_candidate("s1", fts_snippet=None), "score": 0.9}]
+    results, _ = build_envelope(ranked, limit=10)
+    assert results[0]["highlights"] == []

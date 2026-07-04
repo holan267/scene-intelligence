@@ -37,7 +37,8 @@ def test_zero_or_negative_rejected(field):
 def test_search_settings_defaults():
     s = Settings(_env_file=None)
     assert s.search_pool_size == 20
-    assert s.rerank_skip_gap == 0.15
+    assert s.rerank_skip_gap == 0.05
+    assert s.rrf_k == 60
 
 
 def test_search_pool_size_zero_rejected():
@@ -49,3 +50,8 @@ def test_search_pool_size_zero_rejected():
 def test_rerank_skip_gap_out_of_range_rejected(value):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, rerank_skip_gap=value)
+
+
+def test_rrf_k_zero_or_negative_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, rrf_k=0)

@@ -46,6 +46,7 @@ async def search_endpoint(
             limit=req.limit,
             pool_size=settings.search_pool_size,
             gap_threshold=settings.rerank_skip_gap,
+            k=settings.rrf_k,
         )
     except RuntimeError as exc:  # lỗi HTTP/hình dạng response từ embed/rerank model server
         raise HTTPException(status_code=502, detail=str(exc)) from exc

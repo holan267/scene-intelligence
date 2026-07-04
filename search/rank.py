@@ -24,24 +24,27 @@ def filter_fresh_candidates(candidates: list[dict]) -> list[dict]:
     ]
 
 
-def normalize_ann_score(distance: float) -> float:
-    """cosine_distance -> điểm 0-1 (0=không liên quan, 1=giống hệt). Dùng khi bỏ qua rerank."""
-    if not math.isfinite(distance):  # Review fix: NaN/inf -> 0.0 thay vì lọt qua min/max âm thầm
+def normalize_rrf_score(rrf_score: float, *, k: int) -> float:
+    """RRF score -> điểm 0-1, chuẩn hoá theo max lý thuyết 2/(k+1) (Scene #1 ở CẢ hai nhánh
+    ANN+FTS). Dùng cho gap-check + score khi bỏ qua rerank (Story 2.2, thay normalize_ann_score
+    của Story 2.1 — sau story này mọi candidate đều đến từ RRF, không còn ann_distance thuần)."""
+    if not math.isfinite(rrf_score):  # Review fix (Story 2.1): NaN/inf -> 0.0
         return 0.0
-    return max(0.0, min(1.0, 1.0 - distance))
+    max_score = 2.0 / (k + 1)
+    return max(0.0, min(1.0, rrf_score / max_score))
 
 
 async def maybe_rerank(
-    candidates: list[dict], reranker: Reranker, query: str, *, gap_threshold: float
+    candidates: list[dict], reranker: Reranker, query: str, *, gap_threshold: float, k: int
 ) -> list[dict]:
-    """Rerank có điều kiện (AD-8): bỏ qua khi điểm ANN #1 bỏ xa #2."""
-    ranked = sorted(candidates, key=lambda c: normalize_ann_score(c["ann_distance"]), reverse=True)
+    """Rerank có điều kiện (AD-8): bỏ qua khi điểm RRF chuẩn hoá #1 bỏ xa #2."""
+    ranked = sorted(candidates, key=lambda c: normalize_rrf_score(c["rrf_score"], k=k), reverse=True)
     if len(ranked) < 2:
         for c in ranked:
-            c["score"] = normalize_ann_score(c["ann_distance"])
+            c["score"] = normalize_rrf_score(c["rrf_score"], k=k)
         return ranked
 
-    scores = [normalize_ann_score(c["ann_distance"]) for c in ranked]
+    scores = [normalize_rrf_score(c["rrf_score"], k=k) for c in ranked]
     if scores[0] - scores[1] >= gap_threshold:
         for c, s in zip(ranked, scores, strict=True):
             c["score"] = s
@@ -55,7 +58,8 @@ async def maybe_rerank(
 
 def build_envelope(ranked: list[dict], *, limit: int) -> tuple[list[dict], dict]:
     """Dựng envelope {results, meta} (AD-13). thumbnail_url = URL scheme (Story 3.1 mới phục vụ
-    thật); highlights = [] cố định (Story 2.2 full-text mới có nội dung để highlight)."""
+    thật); highlights = [snippet] khi Scene khớp qua FTS (ts_headline, Story 2.2), [] khi chỉ
+    khớp qua ANN."""
     page = ranked[:limit]
     results = [
         {
@@ -65,7 +69,7 @@ def build_envelope(ranked: list[dict], *, limit: int) -> tuple[list[dict], dict]
             "end_ms": c["end_ms"],
             "score": c["score"],
             "thumbnail_url": f"/api/v1/scenes/{c['scene_id']}/thumbnail",
-            "highlights": [],
+            "highlights": [c["fts_snippet"]] if c.get("fts_snippet") else [],
         }
         for c in page
     ]

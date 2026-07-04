@@ -1,5 +1,12 @@
 # Deferred Work
 
+## Deferred from: code review of story-2.2 (2026-07-04)
+
+- **`reciprocal_rank_fusion` không refresh `scene_document`/`doc_version` từ nhánh FTS khi Scene khớp cả 2 nhánh** [search/fuse.py, search/service.py] — nếu pipeline re-embed đúng lúc giữa 2 query tuần tự (ANN rồi FTS, cùng session, READ COMMITTED), candidate hợp nhất có thể mang `scene_document` cũ + `fts_snippet` mới. *(Defer: tác động thấp — `scene_document` không trả ra client; race hẹp cỡ mili-giây; cần thiết kế snapshot/lock nếu muốn triệt để.)*
+- **`embedder.embed(query)` chờ xong hoàn toàn trước khi `fetch_fts_candidates` bắt đầu, dù không cùng tài nguyên (embed không chạm AsyncSession)** [search/service.py] — có thể `asyncio.gather` để giảm latency (embed_latency + fts_latency -> max(embed_latency, fts_latency)). *(Defer: cần xử lý cẩn thận cancel/exception nếu một trong hai raise giữa chừng — TaskGroup thay vì gather trần.)*
+- **`fetch_fts_candidates` trùng lặp pattern SELECT-columns/JOIN/filter `search_status=="indexed"` (AD-17)/row-mapping với `fetch_ann_candidates`, không có helper dùng chung** [search/fts_candidates.py, search/candidates.py] — rủi ro lệch quy tắc AD-17 giữa 2 nhánh nếu chính sách đổi sau này (đã verify không phải rủi ro crash — downstream không đọc field riêng từng nhánh). *(Defer: cleanup/maintainability, factor ra helper chung khi có nhánh retrieval thứ 3.)*
+- **Comment cũ + field chết còn sót lại sau refactor `normalize_ann_score`→`normalize_rrf_score`** [search/query_embed.py, search/fuse.py] — comment ở `query_embed.py` còn nhắc tên hàm cũ; `ann_distance`/`fts_rank_score` trôi qua `reciprocal_rank_fusion` không ai đọc sau merge. *(Defer: cleanup cosmetic, không ảnh hưởng runtime.)*
+
 ## Deferred from: code review of story-2.1 (2026-07-04)
 
 - **Pool ANN cạn không có tín hiệu/widen-retry** [search/service.py, search/candidates.py] — `search_pool_size` cố định (mặc định 20); nếu `filter_fresh_candidates` lọc bớt nhiều (burst re-describe) hoặc `limit` yêu cầu lớn hơn pool, caller nhận ít hơn `limit` kết quả mà không có tín hiệu phân biệt "hết cảnh liên quan" với "pool quá nhỏ". *(Defer: cần thiết kế widen/retry hoặc adaptive pool size khi có bằng chứng thực tế về tần suất.)*
