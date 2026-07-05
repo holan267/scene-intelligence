@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: scene
       POSTGRES_DB: scene_intelligence
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scene -d scene_intelligence"]
       interval: 5s
@@ -32,6 +32,22 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://scene:scene@postgres:5432/scene_intelligence
+      MEDIA_BACKEND: filesystem
+      MEDIA_ROOT: /data/media
+      API_ENV: dev
+    volumes:
+      - D:/media:/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && python -m pipeline.worker_main"]
 
 volumes:
   pgdata:
