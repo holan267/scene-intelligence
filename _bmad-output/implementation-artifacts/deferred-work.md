@@ -1,5 +1,14 @@
 # Deferred Work
 
+## Deferred from: code review of story-2.3 (2026-07-06)
+
+- **Diff không cập nhật OpenAPI example/response schema documentation cho `SearchRequest.filters`** [api/routes_search.py] — field nested `filters` (mới, Story 2.3) không có ví dụ payload cho client API bên ngoài. *(Defer: tài liệu/DX, không ảnh hưởng hành vi runtime.)*
+- **Không có test/guard cho dữ liệu `Scene` hỏng (`end_ms < start_ms`) khi áp `min_duration_ms`/`max_duration_ms`** [shared/filters.py] — về lý thuyết `duration` âm vẫn xử lý đúng theo ngữ nghĩa so sánh số, nhưng chưa verify tường minh. *(Defer: giả định bất biến `end_ms >= start_ms` là trách nhiệm của stage `detect` (Story 1.3, Epic 1), ngoài phạm vi story 2.3.)*
+
+## Deferred from: story creation 2.3 (2026-07-06)
+
+- **`shot_size` (cận/trung/toàn) và "không dính logo/bug đài" filter (FR-7)** [shared/filters.py] — Story 2.3 chỉ implement 2/4 bộ lọc tối thiểu FR-7 (độ dài + có mặt người) vì đây là 2 thuộc tính duy nhất đã có tín hiệu ghi sẵn từ Epic 1. `shot_size` hiện chỉ tồn tại dưới dạng cụm từ trong prose "Bối cảnh" của `scene_document` (Qwen3-VL, Story 1.6) — không phải trường có cấu trúc; "không dính logo" chưa có model/stage phát hiện logo nào trong stack (`stack-verification.md` không nhắc tới). *(Defer: cần story riêng ở Epic 1/2 để thêm stage ingest mới — structured shot-size extraction + chọn/tích hợp logo detector — khi có yêu cầu cụ thể từ phòng biên tập, đúng `[ASSUMPTION]` PRD FR-7 đã đánh dấu.)*
+
 ## Deferred from: code review of story-2.2 (2026-07-04)
 
 - **`reciprocal_rank_fusion` không refresh `scene_document`/`doc_version` từ nhánh FTS khi Scene khớp cả 2 nhánh** [search/fuse.py, search/service.py] — nếu pipeline re-embed đúng lúc giữa 2 query tuần tự (ANN rồi FTS, cùng session, READ COMMITTED), candidate hợp nhất có thể mang `scene_document` cũ + `fts_snippet` mới. *(Defer: tác động thấp — `scene_document` không trả ra client; race hẹp cỡ mili-giây; cần thiết kế snapshot/lock nếu muốn triệt để.)*

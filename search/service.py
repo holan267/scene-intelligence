@@ -10,6 +10,7 @@ from search.fuse import reciprocal_rank_fusion
 from search.query_embed import QueryEmbedder
 from search.rank import build_envelope, filter_fresh_candidates, maybe_rerank
 from search.rerank import Reranker
+from shared.filters import SceneFilters
 
 
 async def search(
@@ -22,13 +23,20 @@ async def search(
     pool_size: int,
     gap_threshold: float,
     k: int,
+    filters: SceneFilters | None = None,
 ) -> tuple[list[dict], dict]:
     query_vec = await embedder.embed(query)
     # Tuần tự trên cùng AsyncSession (KHÔNG asyncio.gather — AsyncSession không an toàn khi
     # 2 coroutine dùng chung 1 session/connection đồng thời). "Song song" ở AD-8 là tầng khái
     # niệm (hai cơ chế truy hồi độc lập được hợp nhất bởi RRF), không phải concurrency runtime.
-    ann_candidates = await fetch_ann_candidates(session, query_vec, pool_size=pool_size)
-    fts_candidates = await fetch_fts_candidates(session, query, pool_size=pool_size)
+    # `filters` (Story 2.3, AD-21) truyền GIỐNG NHAU cho cả hai nhánh — kết hợp NL + lọc
+    # trong cùng một lần tìm, nhất quán trước khi RRF merge.
+    ann_candidates = await fetch_ann_candidates(
+        session, query_vec, pool_size=pool_size, filters=filters
+    )
+    fts_candidates = await fetch_fts_candidates(
+        session, query, pool_size=pool_size, filters=filters
+    )
     fused = reciprocal_rank_fusion(ann_candidates, fts_candidates, k=k)
     fresh = filter_fresh_candidates(fused)
     ranked = await maybe_rerank(fresh, reranker, query, gap_threshold=gap_threshold, k=k)

@@ -13,6 +13,7 @@ from search.rerank import BgeRerankerV2M3
 from search.service import search
 from shared.config import get_settings
 from shared.db import get_session
+from shared.filters import SceneFilters
 
 router = APIRouter(prefix="/api/v1")
 
@@ -20,6 +21,9 @@ router = APIRouter(prefix="/api/v1")
 class SearchRequest(BaseModel):
     query: str
     limit: int = Field(default=10, ge=1, le=100)
+    # Bộ lọc metadata (Story 2.3, AD-21) — import trực tiếp SceneFilters, KHÔNG khai báo
+    # lại field lọc rời ở đây (schema dùng chung duy nhất ở shared/filters.py).
+    filters: SceneFilters | None = None
 
     @field_validator("query")
     @classmethod
@@ -47,6 +51,7 @@ async def search_endpoint(
             pool_size=settings.search_pool_size,
             gap_threshold=settings.rerank_skip_gap,
             k=settings.rrf_k,
+            filters=req.filters,
         )
     except RuntimeError as exc:  # lỗi HTTP/hình dạng response từ embed/rerank model server
         raise HTTPException(status_code=502, detail=str(exc)) from exc

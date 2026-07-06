@@ -10,13 +10,22 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.filters import SceneFilters, apply_scene_filters
 from shared.models import Scene, SceneEmbedding
 
 
 async def fetch_ann_candidates(  # pragma: no cover - phụ thuộc Postgres/pgvector thật
-    session: AsyncSession, query_embedding: list[float], *, pool_size: int
+    session: AsyncSession,
+    query_embedding: list[float],
+    *,
+    pool_size: int,
+    filters: SceneFilters | None = None,
 ) -> list[dict]:
-    """Top-`pool_size` Scene `indexed` gần nhất theo cosine distance (AD-17: chỉ Scene indexed)."""
+    """Top-`pool_size` Scene `indexed` gần nhất theo cosine distance (AD-17: chỉ Scene indexed).
+
+    `filters` (Story 2.3, AD-21) áp dụng TRƯỚC `ORDER BY`/`LIMIT` — filter cắt bớt
+    trước khi pool bị giới hạn, đúng thứ tự phễu AD-8. `None` = không lọc.
+    """
     q = (
         select(
             Scene.scene_id,
@@ -29,9 +38,8 @@ async def fetch_ann_candidates(  # pragma: no cover - phụ thuộc Postgres/pgv
         )
         .join(SceneEmbedding, SceneEmbedding.scene_id == Scene.scene_id)
         .where(Scene.search_status == "indexed")
-        .order_by("ann_distance")
-        .limit(pool_size)
     )
+    q = apply_scene_filters(q, filters).order_by("ann_distance").limit(pool_size)
     rows = (await session.execute(q)).all()
     return [
         {

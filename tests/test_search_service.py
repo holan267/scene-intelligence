@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import search.service as service_module
+from shared.filters import SceneFilters
 from shared.versioning import doc_version
 
 
@@ -42,12 +43,16 @@ def _fake_fts_candidate(scene_id: str, *, scene_document="doc", snippet="**hit**
     }
 
 
-def _patch_fetchers(monkeypatch, *, ann=None, fts=None):
-    async def _fake_ann(session, query_embedding, *, pool_size):
+def _patch_fetchers(monkeypatch, *, ann=None, fts=None, captured_filters=None):
+    async def _fake_ann(session, query_embedding, *, pool_size, filters=None):
         assert query_embedding == [0.1, 0.2, 0.3]
+        if captured_filters is not None:
+            captured_filters["ann"] = filters
         return ann or []
 
-    async def _fake_fts(session, query, *, pool_size):
+    async def _fake_fts(session, query, *, pool_size, filters=None):
+        if captured_filters is not None:
+            captured_filters["fts"] = filters
         return fts or []
 
     monkeypatch.setattr(service_module, "fetch_ann_candidates", _fake_ann)
@@ -114,3 +119,28 @@ async def test_search_scene_in_both_lists_ranks_higher(async_session, monkeypatc
     )
     # s2 xuất hiện ở cả 2 nhánh -> rrf_score cao hơn -> đứng đầu
     assert results[0]["scene_id"] == "s2"
+
+
+async def test_search_forwards_filters_to_both_fetchers(async_session, monkeypatch):
+    captured = {}
+    _patch_fetchers(monkeypatch, ann=[], fts=[], captured_filters=captured)
+
+    filters = SceneFilters(min_duration_ms=1000)
+    await service_module.search(
+        async_session, FakeQueryEmbedder(), FakeReranker(), "q",
+        limit=10, pool_size=20, gap_threshold=0.15, k=60, filters=filters,
+    )
+    assert captured["ann"] is filters
+    assert captured["fts"] is filters
+
+
+async def test_search_defaults_filters_to_none(async_session, monkeypatch):
+    captured = {}
+    _patch_fetchers(monkeypatch, ann=[], fts=[], captured_filters=captured)
+
+    await service_module.search(
+        async_session, FakeQueryEmbedder(), FakeReranker(), "q",
+        limit=10, pool_size=20, gap_threshold=0.15, k=60,
+    )
+    assert captured["ann"] is None
+    assert captured["fts"] is None
