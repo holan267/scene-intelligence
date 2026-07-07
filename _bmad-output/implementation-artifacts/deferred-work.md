@@ -1,5 +1,16 @@
 # Deferred Work
 
+## Deferred from: code review of story-3.1 (2026-07-06)
+
+- **`storage.get()` (đọc bytes keyframe) là lời gọi đồng bộ trong route handler `async def`** [api/routes_media.py] — có thể chặn event loop dưới tải cao khi nhiều request thumbnail đồng thời. *(Defer: ảnh hưởng nhỏ ở quy mô MVP (file JPEG nhỏ); fix đúng cần `run_in_threadpool` có cân nhắc, không phải patch phản xạ.)*
+- **Không có `Cache-Control`/`ETag`/`Last-Modified` trên response thumbnail/stream** [api/routes_media.py] — mỗi lần render lại grid kết quả đều tải lại toàn bộ media từ disk, không tận dụng cache trình duyệt. *(Defer: cần thiết kế cache-invalidation riêng khi Scene được re-detect/re-enrich, ngoài phạm vi 1 patch.)*
+- **Conditional rendering unmount/remount toàn bộ `<img>`/`<video>` mỗi lần hover in/out, không preload** [web/src/App.tsx] — di chuột nhanh qua nhiều kết quả có thể chồng nhiều video đang load cùng lúc, không huỷ request cũ. *(Defer: cần thiết kế lại luồng tương tác (preload/giữ mount cả hai element), lớn hơn phạm vi 1 patch.)*
+
+## Deferred from: story creation 3.1 (2026-07-06)
+
+- **Auth/token thật cho media endpoint (`api/routes_media.py`)** — AD-19 yêu cầu media chỉ phục vụ qua API "cùng cổng auth" với token/hết hạn; Story 3.1 KHÔNG implement (quyết định scope xác nhận với Lan: mạng nội bộ/air-gap — NFR-7 — là ranh giới bảo mật duy nhất cho MVP). *(Defer: cần chốt hạ tầng SSO/LDAP thật của đài trước (xem ARCHITECTURE-SPINE.md dòng 182, `[ASSUMPTION: cần chốt]`) — việc riêng, không phải story frontend/media.)*
+- **Transcode video nguồn sang proxy web-compatible** [api/routes_media.py::video_stream] — endpoint stream đọc trực tiếp `Video.source_key` (bản gốc, có thể MP4/MOV/MXF/MPEG-TS theo FR-1); HTML5 `<video>` chỉ phát được codec/container trình duyệt hỗ trợ (thường H.264/AAC trong MP4) — nguồn MOV/MXF/MPEG-TS có thể KHÔNG phát được trực tiếp trong preview. *(Defer: cần pipeline transcode/proxy riêng (đã từng nhắc "proxy" ở AC Story 1.1 nhưng chưa bao giờ implement) — ngoài phạm vi Story 3.1.)*
+
 ## Deferred from: code review of story-2.3 (2026-07-06)
 
 - **Diff không cập nhật OpenAPI example/response schema documentation cho `SearchRequest.filters`** [api/routes_search.py] — field nested `filters` (mới, Story 2.3) không có ví dụ payload cho client API bên ngoài. *(Defer: tài liệu/DX, không ảnh hưởng hành vi runtime.)*

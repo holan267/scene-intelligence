@@ -67,8 +67,8 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3 — Xem & lấy cảnh để dựng
-  epic-3: backlog
-  3-1-xem-truoc-scene-nhanh-trinh-duyet: backlog
+  epic-3: in-progress
+  3-1-xem-truoc-scene-nhanh-trinh-duyet: done
   3-2-lay-canh-tai-clip-timecode: backlog
   3-3-canh-giong-canh-nay: backlog
   3-4-danh-dau-canh-da-dung: backlog
