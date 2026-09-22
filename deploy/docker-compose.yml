@@ -53,8 +53,16 @@ services:
       # Detect chạy trong worker (PySceneDetect/OpenCV, CPU) — không cần model server.
       DETECT_ON_INGEST: ${DETECT_ON_INGEST:-true}
       DETECT_THRESHOLD: ${DETECT_THRESHOLD:-27.0}
+      # ASR (PhoWhisper-large) + OCR (VietOCR) cũng chạy TRONG worker, không qua model
+      # server: cả hai nạp model in-process chứ không có endpoint OpenAI-compatible.
+      # Mặc định TẮT — image chưa có faster-whisper/easyocr/vietocr lẫn trọng số; bật khi
+      # node đã cài đủ, nếu không mọi task sẽ rơi vào 'error'.
+      ENRICH_ON_INGEST: ${ENRICH_ON_INGEST:-false}
+      ASR_MODEL_DIR: ${ASR_MODEL_DIR:-/models/PhoWhisper-large-ct2}
     volumes:
       - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
+      # Trọng số model để ngoài image (nặng, không commit) — tải sẵn cho air-gap (AD-14).
+      - ${MODEL_HOST_PATH:-../_data/models}:/models:ro
     depends_on:
       postgres:
         condition: service_healthy

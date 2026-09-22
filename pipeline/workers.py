@@ -8,6 +8,10 @@ Story 1.3 wiring: sau khi đăng ký Video, chạy detect -> persist_detection n
 detector/extractor được truyền vào. Inject qua tham số (không tự dựng backend ở đây) để
 test logic hàng đợi vẫn chạy trên sqlite mà không cần video/OpenCV; worker_main dựng
 adapter thật. Không truyền => giữ nguyên hành vi cũ (chỉ đăng ký Video).
+Story 1.4 wiring: sau detect, chạy ASR (PhoWhisper-large) + OCR (VietOCR) cho mọi scene
+của video nếu CÓ transcriber/ocr. Cùng cách tiêm: fake trong test, adapter thật ở
+worker_main. Hai stage độc lập nhau — enrich chạy được cả khi tắt detect (scene đã có
+từ lượt trước).
 """
 from __future__ import annotations
 
@@ -18,10 +22,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pipeline.detect import KeyframeExtractor, SceneDetector, persist_detection
+from pipeline.enrich import (
+    OcrReader,
+    Transcriber,
+    assert_vietnamese_models,
+    enrich_scene_vietnamese,
+)
 from pipeline.ingest import claim_next_task, finalize_job, reclaim_stale_tasks
 from shared.config import get_settings
 from shared.ids import new_video_id
-from shared.models import IngestTask, Video
+from shared.models import IngestTask, Scene, Video
 from shared.storage import StoragePort
 
 
@@ -32,12 +42,17 @@ async def process_task(
     detector: SceneDetector | None = None,
     extractor: KeyframeExtractor | None = None,
     storage: StoragePort | None = None,
+    transcriber: Transcriber | None = None,
+    ocr: OcrReader | None = None,
 ) -> None:
     """Đăng ký Video từ task (idempotent — không đúc Video trùng, AD-5). Lỗi -> task 'error'.
 
     Có đủ detector+extractor+storage thì chạy luôn detect cho video vừa đăng ký.
     persist_detection upsert theo id tất định (AD-1) nên chạy lại là idempotent: re-ingest
     cùng ranh giới ánh xạ về đúng Scene/Shot cũ, không đúc row mới.
+
+    Có đủ transcriber+ocr+storage thì chạy tiếp ASR/OCR cho các scene vừa tách. Thứ tự
+    detect -> enrich là bắt buộc: enrich đọc Scene/Shot.keyframe_key do detect đúc ra.
     """
     try:
         if task.video_id is None:  # chưa gắn Video -> tra theo source_key hoặc đúc mới
@@ -61,6 +76,9 @@ async def process_task(
         if detector is not None and extractor is not None and storage is not None:
             await _detect_video(session, storage, task.video_id, task.source_key,
                                 detector, extractor)
+
+        if transcriber is not None and ocr is not None and storage is not None:
+            await _enrich_video(session, storage, task.video_id, transcriber, ocr)
 
         task.status = "done"
         task.reason = None
@@ -94,6 +112,46 @@ async def _detect_video(
     return await persist_detection(session, storage, video_id, detection, extractor)
 
 
+async def _enrich_video(
+    session: AsyncSession,
+    storage: StoragePort,
+    video_id: str,
+    transcriber: Transcriber,
+    ocr: OcrReader,
+) -> dict:
+    """ASR + OCR cho MỌI scene của video; mỗi scene chỉ ghi cột của stage mình (AD-5).
+
+    Ghi đè cột riêng nên chạy lại là idempotent (Story 1.4) — task bị reclaim/retry
+    enrich lại từ đầu mà không cộng dồn.
+
+    Lời gọi model là blocking và chạy thẳng trên event loop, giống phần trích keyframe
+    trong persist_detection: worker MVP đơn tiến trình không có việc khác để làm xen kẽ.
+    Đẩy sang thread khi worker phải chạy song song nhiều video.
+
+    Một scene hỏng KHÔNG chặn các scene còn lại (video tin tức có hàng trăm scene; mất
+    cả video vì một lỗi ASR là quá đắt) nhưng cũng KHÔNG bị nuốt: gom lại rồi raise ở
+    cuối -> process_task đánh dấu task 'error' và lượt sau chạy lại, ghi đè.
+    """
+    assert_vietnamese_models(transcriber, ocr)  # AD-9: fail ngay, không lặp lỗi từng scene
+    scene_ids = (
+        await session.execute(
+            select(Scene.scene_id).where(Scene.video_id == video_id).order_by(Scene.start_ms)
+        )
+    ).scalars().all()
+
+    failures: list[str] = []
+    for sid in scene_ids:
+        try:
+            await enrich_scene_vietnamese(session, storage, sid, transcriber, ocr)
+        except Exception as exc:  # noqa: BLE001 - gom lỗi, báo sau khi chạy hết scene
+            failures.append(f"{sid}: {exc}")
+    if failures:
+        raise RuntimeError(
+            f"enrich lỗi {len(failures)}/{len(scene_ids)} scene — vd {failures[0]}"
+        )
+    return {"scenes_enriched": len(scene_ids)}
+
+
 async def run_once(
     session: AsyncSession,
     *,
@@ -101,12 +159,15 @@ async def run_once(
     detector: SceneDetector | None = None,
     extractor: KeyframeExtractor | None = None,
     storage: StoragePort | None = None,
+    transcriber: Transcriber | None = None,
+    ocr: OcrReader | None = None,
 ) -> bool:
     """Xử lý 1 task nếu có. True nếu đã xử lý, False nếu hàng đợi rỗng."""
     task = await claim_next_task(session, skip_locked=skip_locked)
     if task is None:
         return False
-    await process_task(session, task, detector=detector, extractor=extractor, storage=storage)
+    await process_task(session, task, detector=detector, extractor=extractor, storage=storage,
+                       transcriber=transcriber, ocr=ocr)
     return True
 
 
@@ -117,6 +178,8 @@ async def drain(
     detector: SceneDetector | None = None,
     extractor: KeyframeExtractor | None = None,
     storage: StoragePort | None = None,
+    transcriber: Transcriber | None = None,
+    ocr: OcrReader | None = None,
 ) -> dict:
     """Xử hết task queued rồi finalize các job bị ảnh hưởng (orchestrator wiring, AD-18).
 
@@ -140,7 +203,8 @@ async def drain(
         if task is None:
             break
         job_ids.add(task.job_id)
-        await process_task(session, task, detector=detector, extractor=extractor, storage=storage)
+        await process_task(session, task, detector=detector, extractor=extractor,
+                           storage=storage, transcriber=transcriber, ocr=ocr)
         processed += 1
     for jid in job_ids:
         await finalize_job(session, jid)

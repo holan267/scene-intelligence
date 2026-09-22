@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # Ngưỡng ContentDetector của PySceneDetect: thấp -> cắt nhiều cảnh hơn. 27.0 là mặc
     # định của thư viện; [ASSUMPTION] chưa tinh chỉnh theo chất liệu tin tức (Epic 4).
     detect_threshold: float = Field(default=27.0, gt=0)
+    # Enrich tiếng Việt (Story 1.4 wiring): worker chạy ASR (PhoWhisper-large) + OCR
+    # (VietOCR) cho từng scene ngay sau detect.
+    # Mặc định TẮT — khác detect_on_ingest: `scenedetect` là dependency cứng của project,
+    # còn faster-whisper/easyocr/vietocr + trọng số PhoWhisper-large (convert CTranslate2)
+    # KHÔNG nằm trong pyproject (nặng, tải riêng theo node cho air-gap AD-14). Bật mặc
+    # định sẽ khiến MỌI task rơi vào 'error' trên máy chưa cài model. Bật khi node worker
+    # đã có đủ model.
+    enrich_on_ingest: bool = False
+    # Thư mục model PhoWhisper-large đã convert sang CTranslate2 (faster-whisper nạp theo
+    # đường dẫn). Trong container: mount trọng số vào /models (xem deploy/docker-compose.yml).
+    asr_model_dir: str = "PhoWhisper-large"
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)
     task_max_attempts: int = Field(default=3, gt=0)

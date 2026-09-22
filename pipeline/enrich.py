@@ -37,6 +37,13 @@ def _assert_vietnamese(model: object, role: str) -> None:
         raise ValueError(f"{role} không hỗ trợ tiếng Việt (language={lang!r}) — vi phạm AD-9")
 
 
+def assert_vietnamese_models(transcriber: Transcriber, ocr: OcrReader) -> None:
+    """Guard AD-9 gọi được từ ngoài: fail SỚM (lúc dựng port ở worker) thay vì lặp lỗi
+    trên từng scene. `enrich_scene_vietnamese` vẫn tự guard — port có thể đến từ nơi khác."""
+    _assert_vietnamese(transcriber, "ASR")
+    _assert_vietnamese(ocr, "OCR")
+
+
 async def enrich_scene_vietnamese(
     session: AsyncSession,
     storage: StoragePort,
