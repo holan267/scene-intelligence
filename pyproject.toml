@@ -12,6 +12,11 @@ dependencies = [
     "alembic>=1.14",
     "pgvector>=0.3",
     "httpx>=0.28",
+    # Decode video cho bước detect (pipeline/detect_backends.py).
+    # Ghim <0.7: từ 0.7 scenedetect phụ thuộc CỨNG vào opencv-python bản GUI (bỏ extra
+    # headless), kéo theo libGL/libxcb mà image slim không có -> ImportError lúc import
+    # cv2. Nhánh 0.6 còn extra `opencv-headless` nên chỉ cài opencv-python-headless.
+    "scenedetect[opencv-headless]>=0.6.4,<0.7",
 ]
 
 [dependency-groups]

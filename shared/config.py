@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     describe_model_url: str = "http://localhost:8001"
     embed_model_url: str = "http://localhost:11434"
     rerank_model_url: str = "http://localhost:8003"
+    # Detect (Story 1.3): worker chạy tách scene/shot ngay sau khi đăng ký Video.
+    # Tắt (DETECT_ON_INGEST=false) khi chỉ muốn nạp danh mục video mà chưa decode.
+    detect_on_ingest: bool = True
+    # Ngưỡng ContentDetector của PySceneDetect: thấp -> cắt nhiều cảnh hơn. 27.0 là mặc
+    # định của thư viện; [ASSUMPTION] chưa tinh chỉnh theo chất liệu tin tức (Epic 4).
+    detect_threshold: float = Field(default=27.0, gt=0)
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)
     task_max_attempts: int = Field(default=3, gt=0)

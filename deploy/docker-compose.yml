@@ -50,6 +50,9 @@ services:
       MEDIA_ROOT: /data/media
       API_ENV: dev
       EMBED_MODEL_URL: ${EMBED_MODEL_URL:-http://host.docker.internal:11434}
+      # Detect chạy trong worker (PySceneDetect/OpenCV, CPU) — không cần model server.
+      DETECT_ON_INGEST: ${DETECT_ON_INGEST:-true}
+      DETECT_THRESHOLD: ${DETECT_THRESHOLD:-27.0}
     volumes:
       - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
     depends_on:

@@ -36,6 +36,31 @@ chuẩn). Nếu bạn đã có volume `pgdata` tạo từ compose cũ, **đừng
 tạo volume mới (`docker compose down -v` rồi `up` lại) và phục hồi dữ liệu qua `pg_restore`
 (mục Backup bên dưới) thay vì trông chờ volume cũ tự khớp path mới.
 
+## Nạp lô & chạy pipeline
+
+Worker (`deploy-worker-1`) **không tự quét** thư mục media: nó chỉ drain hàng đợi trong
+Postgres. Job phải được nạp qua API — `source_dir` là đường **trong container**
+(`/data/media`, không phải đường host; `resolve_source_dir` chặn mọi path ngoài MEDIA_ROOT):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ingest \
+  -H 'Content-Type: application/json' -d '{"source_dir":"/data/media"}'
+# -> {"meta": {"job_id": "...", "queued": 1, ...}}
+
+curl http://localhost:8000/api/v1/jobs/<job_id>     # theo dõi tiến độ
+```
+
+Mỗi task: đăng ký `Video` → **detect** (tách scene/shot + trích keyframe, dedupe pHash).
+Keyframe ghi vào `MEDIA_ROOT/<video_id>/keyframes/` (dẫn xuất, loại khỏi backup — AD-4).
+Decode chạy bằng CPU trong container, không cần model server. Tắt bằng
+`DETECT_ON_INGEST=false` trong `deploy/.env` nếu chỉ muốn nạp danh mục.
+
+Nạp lại cùng thư mục chỉ re-queue task `skipped`/`error`; task `done` bị coi là trùng. Muốn
+detect lại từ đầu (vd đổi `DETECT_THRESHOLD`) thì xoá row tương ứng trong `ingest_task`.
+
+Các bước enrich/describe/embed **chưa** nối vào worker — job `done` nghĩa là đã detect xong,
+chưa có mô tả hay vector.
+
 ## Model server BGE-M3 (bắt buộc cho search & bước embed của pipeline)
 
 BGE-M3 **không** nằm trong compose: nó cần GPU/Metal của máy host mà container không có.
