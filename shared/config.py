@@ -17,9 +17,16 @@ class Settings(BaseSettings):
     media_backend: str = "filesystem"
     media_root: str = "./_data/media"
     api_env: str = "dev"
-    # Model servers (vLLM/embedder, AD-14) — endpoint OpenAI-compatible (Story 1.6)
+    # Model servers (AD-14) — endpoint OpenAI-compatible (Story 1.6).
+    # Dev 1 máy (Apple Silicon: vLLM cần CUDA, không chạy native) dùng Ollama làm model
+    # server: `ollama serve` mở cổng 11434 với /v1/embeddings tương thích OpenAI. Ollama
+    # match tên model KHÔNG phân biệt hoa/thường nên `"model": "BGE-M3"` hardcode trong
+    # adapter khớp đúng `bge-m3:latest`, trả dense 1024 chiều = SCENE_EMBEDDING_DIM.
+    # Từ TRONG container phải dùng host.docker.internal thay cho localhost (localhost trỏ
+    # vào chính container) — xem EMBED_MODEL_URL trong deploy/docker-compose.yml.
+    # On-prem GPU thật: trỏ sang vLLM/TEI riêng (cổng 8001-8003 như thiết kế ban đầu).
     describe_model_url: str = "http://localhost:8001"
-    embed_model_url: str = "http://localhost:8002"
+    embed_model_url: str = "http://localhost:11434"
     rerank_model_url: str = "http://localhost:8003"
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)

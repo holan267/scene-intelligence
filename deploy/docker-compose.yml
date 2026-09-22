@@ -25,8 +25,15 @@ services:
       MEDIA_BACKEND: filesystem
       MEDIA_ROOT: /data/media          # mount NAS/SAN cho kho thật; ổ local cho dev
       API_ENV: dev
+      # BGE-M3 chạy NGOÀI compose (Ollama trên host, cần Metal/GPU mà container không có).
+      # host.docker.internal = máy host nhìn từ trong container; localhost sẽ trỏ vào
+      # chính container này và gây 502 "Gọi BGE-M3 thất bại: All connection attempts failed".
+      EMBED_MODEL_URL: ${EMBED_MODEL_URL:-http://host.docker.internal:11434}
     volumes:
-      - D:/media:/data/media            # <-- bind mount ổ D: Windows; đổi thành NAS/SAN thật khi triển khai
+      # Đường host đặt trong MEDIA_HOST_PATH (deploy/.env) — khác nhau theo máy:
+      # Windows: D:/media   |   macOS/Linux: /Volumes/media, /mnt/media...
+      # Mặc định: ../_data/media (tương đối so với deploy/, dùng cho dev).
+      - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,8 +49,9 @@ services:
       MEDIA_BACKEND: filesystem
       MEDIA_ROOT: /data/media
       API_ENV: dev
+      EMBED_MODEL_URL: ${EMBED_MODEL_URL:-http://host.docker.internal:11434}
     volumes:
-      - D:/media:/data/media
+      - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
     depends_on:
       postgres:
         condition: service_healthy
