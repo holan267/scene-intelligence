@@ -1,5 +1,12 @@
 # Deferred Work
 
+## Deferred from: nối stage describe + embed/index vào worker (2026-09-23)
+
+- **Stage face/object (Story 1.5) vẫn CHƯA được nối vào worker** [pipeline/workers.py, pipeline/enrich_vision.py] — `describe_scene` đọc `scene.objects` + `FaceAppearance` làm hints, nhưng không stage nào trong worker ghi hai nguồn đó, nên Scene Document hiện chỉ dựng từ transcript + ocr_text. Mọi scene thật sẽ thiếu hẳn nhánh hints thị giác (FR-4) và phần siết nhiễu theo nhãn đối tượng (FR-13) không có gì để lọc. *(Defer: wiring riêng cho stage vision, cùng hình dạng với hai wiring đã có — ngoài phạm vi lần nối describe/index này.)*
+- **describe gọi lại VLM cho MỌI scene ở mỗi lượt task, kể cả scene đã `indexed`** [pipeline/workers.py::_index_video] — không có bước bỏ qua theo `doc_version` (AD-16 đã lưu sẵn checksum để so). Task bị retry/reclaim, hoặc re-queue chỉ để index lại một scene hỏng, sẽ trả tiền Qwen3-VL cho cả video. Nặng hơn hẳn enrich vì VLM đắt hơn ASR mỗi scene. *(Defer: cần mô hình trạng thái per-stage/per-scene, trùng đúng gốc với mục "không có đường chạy lại RIÊNG stage enrich" bên dưới — làm một lần cho cả ba stage.)*
+- **`corpus_stopwords` quét toàn bảng `scene` mỗi lần index một video** [pipeline/workers.py::_index_video, pipeline/noise.py] — `select(Scene.ocr_text, Scene.objects)` không giới hạn, kho lớn dần thì mỗi task nạp kéo cả bảng về Python. Đã tính 1 lần/video thay vì 1 lần/scene, nhưng vẫn là full scan. *(Defer: đẩy đếm xuống SQL (GROUP BY + HAVING) hoặc cache tập stopword theo lô ingest khi có bằng chứng về quy mô kho.)*
+- **Model describe/embed chặn event loop** [pipeline/workers.py::_index_video] — `describer.describe()`/`embedder.embed()` là lời gọi HTTP đồng bộ (httpx sync) chạy thẳng trên event loop, cùng vấn đề đã ghi cho ASR/OCR. *(Defer: đẩy sang thread khi worker phải chạy song song nhiều video — làm cùng lúc với mục tương ứng của enrich.)*
+
 ## Deferred from: nối stage ASR/OCR vào worker (2026-09-23)
 
 - **ASR decode lại TOÀN BỘ audio cho mỗi scene** [pipeline/enrich_backends.py] — `model.transcribe(path, clip_timestamps=...)` decode cả file rồi mới cắt đoạn; log lượt chạy tet2026_02.mp4 cho thấy `Processing audio with duration 00:38.591` lặp đúng bằng số scene (21 lần). Chi phí decode là O(số scene × thời lượng video): video tin tức 1 giờ với 500 scene sẽ decode ~500 giờ audio chỉ để lấy ra 1 giờ. *(Defer: faster-whisper nhận được ndarray nên fix là decode 1 lần/video rồi truyền lát cắt, nhưng đổi hợp đồng `Transcriber` port — cần làm cùng lúc với đo trên video dài thật.)*

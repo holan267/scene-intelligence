@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # KHÔNG nằm trong pyproject (nặng, tải riêng theo node cho air-gap AD-14). Bật mặc
     # định sẽ khiến MỌI task rơi vào 'error' trên máy chưa cài model. Bật khi node worker
     # đã có đủ model.
-    enrich_on_ingest: bool = False
+    enrich_on_ingest: bool = True
     # Trọng số ASR/OCR nạp từ ĐĨA, không bao giờ tải lúc chạy (AD-14 air-gap) — cả ba thư
     # viện đều mặc định tự tải về ~/.cache. Dựng bằng `deploy/fetch-models.sh` trên máy có
     # Internet rồi copy sang node. Trong container: mount vào /models (docker-compose.yml).
@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # đọc biến này. Triển khai đích là 1 node GPU (AD-14): đặt 'cuda' khi node có GPU, OCR
     # hàng trăm keyframe/video trên CPU rất chậm.
     enrich_device: str = "cpu"
+    # Index (Story 1.6 wiring): worker chạy describe (Qwen3-VL) -> embed/index (BGE-M3) cho
+    # từng scene sau enrich. Đây là stage DUY NHẤT set `scene.search_status='indexed'`
+    # (AD-17) — tắt thì scene nằm ở 'pending' và search không trả về gì.
+    # Mặc định TẮT: khác detect/enrich (chạy in-process), stage này cần HAI model server
+    # (AD-14) sống ở describe_model_url + embed_model_url; bật khi chưa có server sẽ đẩy
+    # mọi task vào 'error'.
+    index_on_ingest: bool = True
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)
     task_max_attempts: int = Field(default=3, gt=0)

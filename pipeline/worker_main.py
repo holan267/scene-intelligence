@@ -5,8 +5,9 @@ mỗi vòng lặp `drain()` tự requeue/expire task 'claimed' quá hạn, khôn
 Đơn tiến trình cho MVP; không có `worker_id` (không cần định danh worker cụ thể ở quy mô này).
 
 Đây cũng là nơi DUY NHẤT dựng adapter model thật (PySceneDetect/OpenCV cho detect,
-PhoWhisper-large/VietOCR cho enrich) rồi tiêm vào drain() — pipeline.workers giữ thuần
-logic hàng đợi, không phụ thuộc OpenCV/faster-whisper.
+PhoWhisper-large/VietOCR cho enrich, Qwen3-VL/BGE-M3 qua model server cho describe+index)
+rồi tiêm vào drain() — pipeline.workers giữ thuần logic hàng đợi, không phụ thuộc
+OpenCV/faster-whisper.
 """
 from __future__ import annotations
 
@@ -68,6 +69,32 @@ def _build_enrich_ports(settings, storage):
     return transcriber, ocr
 
 
+def _build_index_ports(settings):
+    """Dựng (describer, embedder) nếu bật INDEX_ON_INGEST; không thì (None, None).
+
+    Khác detect/enrich: hai adapter này chỉ gọi HTTP tới model server (AD-14), không nạp
+    model in-process, cũng không cần storage-port (keyframe do `describe_scene` đọc hộ,
+    AD-23). httpx là dependency cứng nên import không cần guarded vì thiếu gói; vẫn để
+    trong hàm cho đồng nhất với hai hàm trên.
+
+    Không ping model server lúc boot: server có thể lên sau worker, và lỗi gọi model đã
+    được `_index_video` gom lại thành task 'error' (AD-17 giữ scene ở 'pending', không có
+    scene nửa-index nào lọt vào search).
+    """
+    if not settings.index_on_ingest:
+        log.info("describe/index tắt theo cấu hình", extra={"stage": "worker-boot"})
+        return None, None
+    from pipeline.describe_backends import Qwen3VLDescriber
+    from pipeline.embed_backends import BgeM3Embedder
+
+    log.info(
+        f"index bật: Qwen3-VL @ {settings.describe_model_url}, "
+        f"BGE-M3 @ {settings.embed_model_url}",
+        extra={"stage": "worker-boot"},
+    )
+    return Qwen3VLDescriber(settings), BgeM3Embedder(settings)
+
+
 async def _loop(poll_seconds: float = 2.0) -> None:
     configure_logging()
     settings = get_settings()
@@ -75,12 +102,13 @@ async def _loop(poll_seconds: float = 2.0) -> None:
     storage = build_storage(settings)
     detector, extractor = _build_detect_ports(settings, storage)
     transcriber, ocr = _build_enrich_ports(settings, storage)
+    describer, embedder = _build_index_ports(settings)
     maker = get_sessionmaker()
     while True:
         async with maker() as session:
             result = await drain(
                 session, detector=detector, extractor=extractor, storage=storage,
-                transcriber=transcriber, ocr=ocr,
+                transcriber=transcriber, ocr=ocr, describer=describer, embedder=embedder,
             )
             await session.commit()
         if result["processed"]:

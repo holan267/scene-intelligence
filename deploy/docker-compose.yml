@@ -70,6 +70,12 @@ services:
       OCR_RECOGNIZER_DIR: ${OCR_RECOGNIZER_DIR:-/models/vietocr}
       # cpu | cuda — EasyOCR/VietOCR. Node có GPU thì đặt cuda (OCR hàng trăm keyframe/video).
       ENRICH_DEVICE: ${ENRICH_DEVICE:-cpu}
+      # describe (Qwen3-VL) + embed/index (BGE-M3): stage DUY NHẤT set search_status=
+      # 'indexed' (AD-17). Tắt => scene nạp xong vẫn ở 'pending' và search trả rỗng.
+      # Khác ASR/OCR: hai model này chạy NGOÀI worker trên model server (AD-14) nên không
+      # cần INSTALL_ENRICH, nhưng cần cả hai URL dưới đây trỏ tới server đang sống.
+      INDEX_ON_INGEST: ${INDEX_ON_INGEST:-false}
+      DESCRIBE_MODEL_URL: ${DESCRIBE_MODEL_URL:-http://host.docker.internal:8001}
     volumes:
       - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
       # Trọng số model để ngoài image (nặng, không commit) — nạp sẵn cho air-gap (AD-14).

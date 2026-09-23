@@ -23,3 +23,20 @@ Nhờ vậy test hàng đợi chạy trên sqlite với fake port, không cần 
 
 Tắt detect: `DETECT_ON_INGEST=false` (chỉ nạp danh mục video, không decode).
 Ngưỡng cắt cảnh: `DETECT_THRESHOLD` (mặc định 27.0 — thấp hơn ⇒ cắt nhiều cảnh hơn).
+
+## Dọn dữ liệu ingest
+
+`python -m pipeline.clean` xoá dữ liệu **dẫn xuất** để nạp lại từ đầu: `scene_embedding` →
+`face_appearance` → `shot` → `scene` → `video` → `ingest_task` → `job`, kèm keyframe dưới
+`<video_id>/keyframes/`. File video gốc trong `MEDIA_ROOT` **không** bị đụng — nạp lại bằng
+`POST /ingest` là dựng lại được toàn bộ (AD-4: Postgres là SoT).
+
+```sh
+python -m pipeline.clean --dry-run              # xem trước, không xoá gì
+python -m pipeline.clean --yes                  # dọn sạch, không hỏi
+python -m pipeline.clean --source-key news/a.mp4  # chỉ 1 video (hoặc --video-id)
+python -m pipeline.clean --keep-keyframes       # chỉ xoá dòng DB, giữ file keyframe
+```
+
+Xoá `ingest_task` là phần bắt buộc: dedupe trong `enqueue_batch` bỏ qua task `done`, nên
+task còn sót sẽ chặn lượt nạp lại.
