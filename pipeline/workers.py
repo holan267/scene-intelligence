@@ -51,8 +51,9 @@ async def process_task(
     persist_detection upsert theo id tất định (AD-1) nên chạy lại là idempotent: re-ingest
     cùng ranh giới ánh xạ về đúng Scene/Shot cũ, không đúc row mới.
 
-    Có đủ transcriber+ocr+storage thì chạy tiếp ASR/OCR cho các scene vừa tách. Thứ tự
-    detect -> enrich là bắt buộc: enrich đọc Scene/Shot.keyframe_key do detect đúc ra.
+    Có đủ transcriber+storage thì chạy tiếp ASR cho các scene vừa tách; `ocr` là tuỳ chọn
+    (None => ASR-only). Thứ tự detect -> enrich là bắt buộc: enrich đọc Scene/Shot.keyframe_key
+    do detect đúc ra.
     """
     try:
         if task.video_id is None:  # chưa gắn Video -> tra theo source_key hoặc đúc mới
@@ -77,7 +78,7 @@ async def process_task(
             await _detect_video(session, storage, task.video_id, task.source_key,
                                 detector, extractor)
 
-        if transcriber is not None and ocr is not None and storage is not None:
+        if transcriber is not None and storage is not None:
             await _enrich_video(session, storage, task.video_id, transcriber, ocr)
 
         task.status = "done"
@@ -117,9 +118,11 @@ async def _enrich_video(
     storage: StoragePort,
     video_id: str,
     transcriber: Transcriber,
-    ocr: OcrReader,
+    ocr: OcrReader | None,
 ) -> dict:
     """ASR + OCR cho MỌI scene của video; mỗi scene chỉ ghi cột của stage mình (AD-5).
+
+    `ocr=None` => ASR-only, `scene.ocr_text` giữ nguyên (xem enrich_scene_vietnamese).
 
     Ghi đè cột riêng nên chạy lại là idempotent (Story 1.4) — task bị reclaim/retry
     enrich lại từ đầu mà không cộng dồn.

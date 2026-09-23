@@ -196,3 +196,40 @@ async def test_drain_passes_enrich_ports_through(tmp_path, async_session):
     assert result["processed"] == 1
     scenes = (await async_session.execute(select(Scene))).scalars().all()
     assert scenes and all(s.transcript is not None for s in scenes)
+
+
+async def test_asr_only_leaves_ocr_text_untouched(tmp_path, async_session):
+    # ocr=None (trọng số OCR chưa nạp được): ASR vẫn chạy, ocr_text KHÔNG bị ghi đè
+    storage = FilesystemStorage(tmp_path)
+    session = async_session
+    session.add(Video(video_id="v1", framerate=25.0, source_key="a.mp4"))
+    sid = make_scene_id("v1", 0, 2000)
+    session.add(Scene(scene_id=sid, video_id="v1", start_ms=0, end_ms=2000,
+                      ocr_text="CHỮ TỪ LƯỢT TRƯỚC"))
+    task = await _seed_task(session)
+
+    await process_task(session, task, storage=storage, transcriber=FakeTranscriber(), ocr=None)
+
+    assert task.status == "done"
+    scene = await session.get(Scene, sid)
+    assert scene.transcript == "lời thoại 0"      # ASR có chạy
+    assert scene.ocr_text == "CHỮ TỪ LƯỢT TRƯỚC"  # stage OCR không chạy => không ghi gì (AD-5)
+
+
+async def test_asr_only_through_detect_path(tmp_path, async_session):
+    # Đường đầy đủ detect -> enrich nhưng không có OCR port
+    task = await _seed_task(async_session)
+
+    await process_task(
+        async_session, task,
+        detector=FakeDetector(), extractor=FakeExtractor(),
+        storage=FilesystemStorage(tmp_path),
+        transcriber=FakeTranscriber(), ocr=None,
+    )
+
+    assert task.status == "done"
+    scenes = (
+        await async_session.execute(select(Scene).order_by(Scene.start_ms))
+    ).scalars().all()
+    assert [s.transcript for s in scenes] == ["lời thoại 0", "lời thoại 2000"]
+    assert all(s.ocr_text is None for s in scenes)

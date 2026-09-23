@@ -50,16 +50,108 @@ curl -X POST http://localhost:8000/api/v1/ingest \
 curl http://localhost:8000/api/v1/jobs/<job_id>     # theo dõi tiến độ
 ```
 
-Mỗi task: đăng ký `Video` → **detect** (tách scene/shot + trích keyframe, dedupe pHash).
-Keyframe ghi vào `MEDIA_ROOT/<video_id>/keyframes/` (dẫn xuất, loại khỏi backup — AD-4).
-Decode chạy bằng CPU trong container, không cần model server. Tắt bằng
-`DETECT_ON_INGEST=false` trong `deploy/.env` nếu chỉ muốn nạp danh mục.
+Mỗi task: đăng ký `Video` → **detect** (tách scene/shot + trích keyframe, dedupe pHash) →
+**enrich** (ASR + OCR, nếu bật). Keyframe ghi vào `MEDIA_ROOT/<video_id>/keyframes/` (dẫn
+xuất, loại khỏi backup — AD-4). Decode chạy bằng CPU trong container, không cần model
+server. Tắt bằng `DETECT_ON_INGEST=false` trong `deploy/.env` nếu chỉ muốn nạp danh mục.
 
 Nạp lại cùng thư mục chỉ re-queue task `skipped`/`error`; task `done` bị coi là trùng. Muốn
 detect lại từ đầu (vd đổi `DETECT_THRESHOLD`) thì xoá row tương ứng trong `ingest_task`.
 
-Các bước enrich/describe/embed **chưa** nối vào worker — job `done` nghĩa là đã detect xong,
-chưa có mô tả hay vector.
+Các bước describe/embed **chưa** nối vào worker — job `done` nghĩa là đã detect (và enrich
+nếu bật) xong, chưa có `scene_document` hay vector.
+
+## Stage enrich: ASR (PhoWhisper-large) + OCR (EasyOCR + VietOCR)
+
+Khác BGE-M3 bên dưới, hai model này **chạy in-process trong worker**, không qua model
+server — chúng không có endpoint OpenAI-compatible. Mặc định **TẮT**. Bật cần đủ ba thứ:
+
+| # | Thứ cần | Làm sao |
+| --- | --- | --- |
+| 1 | Thư viện trong image | `INSTALL_ENRICH=true` (build-arg, +~2-3 GB vì torch) |
+| 2 | Trọng số trên đĩa | `deploy/fetch-models.sh` trên máy **có Internet**, copy sang node |
+| 3 | Bật stage | `ENRICH_ON_INGEST=true` (thêm `ENRICH_OCR=false` nếu chỉ chạy ASR) |
+
+Thiếu bất kỳ cái nào thì task rơi vào `error` kèm thông báo chỉ rõ thiếu gì (worker không
+sập). Kết quả ghi vào `scene.transcript` và `scene.ocr_text`.
+
+### Chạy ASR-only (`ENRICH_OCR=false`)
+
+Dùng khi trọng số OCR chưa nạp được. ASR vẫn chạy bình thường; stage OCR **không ghi gì**
+vào `scene.ocr_text`, nên kết quả OCR của lượt trước (nếu có) không bị xoá — đúng AD-5.
+Không có cờ riêng để tắt ASR: tắt ASR nghĩa là tắt luôn `ENRICH_ON_INGEST`.
+
+### Vướng đã gặp khi dựng trọng số
+
+- **VietOCR:** `ModuleNotFoundError: No module named 'pkg_resources'`. vietocr vẫn import
+  `pkg_resources`, thứ đã bị gỡ khỏi môi trường Python ≥3.12 khi không có setuptools. Cài
+  thêm `setuptools` vào cùng venv rồi chạy lại `fetch-models.sh`.
+- **ASR trên CPU:** ctranslate2 báo `compute type ... float16 ... converted to float32` —
+  máy không chạy được float16 nên model nở gấp đôi bộ nhớ và chậm hơn. Trên node CPU nên
+  dựng lại bằng `ASR_QUANTIZATION=int8 deploy/fetch-models.sh`; trên node GPU thì float16
+  là đúng.
+
+### Dựng trọng số (bước một lần, trên máy có Internet)
+
+Runtime **không bao giờ tải trọng số** (AD-14). Cả ba thư viện đều mặc định tự tải về
+`~/.cache` khi gọi lần đầu — trong container thì vừa gọi Internet vừa mất sạch sau mỗi lần
+restart, nên `pipeline/enrich_backends.py` chặn hết các đường đó và fail nếu thiếu file.
+
+```bash
+uv pip install -e '.[enrich,fetch-models]'
+deploy/fetch-models.sh                 # mặc định ghi vào <repo>/_data/models
+```
+
+Script làm ba việc, bỏ qua thứ đã có (chạy lại an toàn):
+
+1. **PhoWhisper-large** — tải từ `vinai/PhoWhisper-large` rồi **convert sang CTranslate2**.
+   Bước convert là bắt buộc: PhoWhisper ship dạng HF/Whisper weights, faster-whisper không
+   nạp trực tiếp được. Script cũng bảo đảm có `tokenizer.json` — thiếu file này thì lúc
+   chạy faster-whisper lặng lẽ tải `openai/whisper-tiny` từ HuggingFace.
+2. **EasyOCR CRAFT** (`craft_mlt_25k.pth`) — chỉ phần dò vùng chữ; phần đọc để VietOCR lo
+   vì recognizer `vi` sẵn có của EasyOCR đọc dấu kém hơn hẳn.
+3. **VietOCR** (`vgg_transformer.pth` + `.yml`) — bản Python **pbcquoc**, không phải app
+   Java Tesseract trùng tên. Config YAML được lưu ra đĩa vì `Cfg.load_config_from_name()`
+   tải config từ `vocr.vn` qua mạng, không chạy được trên node air-gap.
+
+Kết quả (~3-4 GB):
+
+```
+_data/models/
+├── PhoWhisper-large-ct2/   model.bin, tokenizer.json, preprocessor_config.json...
+├── easyocr/                craft_mlt_25k.pth
+├── vietocr/                vgg_transformer.pth, vgg_transformer.yml
+└── SHA256SUMS
+```
+
+Copy sang node air-gap rồi **đối chiếu** — sneakernet hay hỏng âm thầm:
+
+```bash
+rsync -a _data/models/ <node>:/srv/scene-intelligence/_data/models/
+ssh <node> 'cd /srv/scene-intelligence/_data/models && shasum -a 256 -c SHA256SUMS'
+```
+
+### Bật trên node
+
+```bash
+# deploy/.env
+INSTALL_ENRICH=true
+ENRICH_ON_INGEST=true
+MODEL_HOST_PATH=/srv/scene-intelligence/_data/models
+ENRICH_DEVICE=cuda      # cpu nếu node không có GPU
+
+docker compose build worker && docker compose up -d worker
+```
+
+`MODEL_HOST_PATH` bind-mount **read-only** vào `/models`. Đặt `ENRICH_DEVICE=cuda` khi node
+có GPU — OCR hàng trăm keyframe mỗi video trên CPU rất chậm. (compose chưa khai báo
+`deploy.resources.devices`; thêm khi có node GPU thật.)
+
+### ⚠️ License cần rà trước khi thương mại hoá
+
+- **PhoWhisper-large** là tài sản nghiên cứu của VinAI. Whisper gốc là MIT nhưng điều khoản
+  của bản fine-tune mới là thứ có hiệu lực — rà trước khi bán ra ngoài.
+- EasyOCR (Apache-2.0) và VietOCR (Apache-2.0) thì sạch.
 
 ## Model server BGE-M3 (bắt buộc cho search & bước embed của pipeline)
 

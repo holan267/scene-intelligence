@@ -44,6 +44,10 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # true => image worker có thêm faster-whisper/easyocr/vietocr (+~2-3 GB vì torch).
+        # Bắt buộc bật cùng ENRICH_ON_INGEST, nếu không stage enrich sẽ fail lúc nạp model.
+        INSTALL_ENRICH: ${INSTALL_ENRICH:-false}
     environment:
       DATABASE_URL: postgresql+psycopg://scene:scene@postgres:5432/scene_intelligence
       MEDIA_BACKEND: filesystem
@@ -55,13 +59,21 @@ services:
       DETECT_THRESHOLD: ${DETECT_THRESHOLD:-27.0}
       # ASR (PhoWhisper-large) + OCR (VietOCR) cũng chạy TRONG worker, không qua model
       # server: cả hai nạp model in-process chứ không có endpoint OpenAI-compatible.
-      # Mặc định TẮT — image chưa có faster-whisper/easyocr/vietocr lẫn trọng số; bật khi
-      # node đã cài đủ, nếu không mọi task sẽ rơi vào 'error'.
+      # Mặc định TẮT. Cần CẢ HAI: INSTALL_ENRICH=true (thư viện) + trọng số trong /models
+      # (dựng bằng deploy/fetch-models.sh). Thiếu một trong hai => task rơi vào 'error'
+      # kèm thông báo chỉ rõ thiếu gì.
       ENRICH_ON_INGEST: ${ENRICH_ON_INGEST:-false}
+      # false => chỉ chạy ASR, KHÔNG đụng scene.ocr_text (dùng khi trọng số OCR chưa sẵn).
+      ENRICH_OCR: ${ENRICH_OCR:-true}
       ASR_MODEL_DIR: ${ASR_MODEL_DIR:-/models/PhoWhisper-large-ct2}
+      OCR_DETECTOR_DIR: ${OCR_DETECTOR_DIR:-/models/easyocr}
+      OCR_RECOGNIZER_DIR: ${OCR_RECOGNIZER_DIR:-/models/vietocr}
+      # cpu | cuda — EasyOCR/VietOCR. Node có GPU thì đặt cuda (OCR hàng trăm keyframe/video).
+      ENRICH_DEVICE: ${ENRICH_DEVICE:-cpu}
     volumes:
       - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
-      # Trọng số model để ngoài image (nặng, không commit) — tải sẵn cho air-gap (AD-14).
+      # Trọng số model để ngoài image (nặng, không commit) — nạp sẵn cho air-gap (AD-14).
+      # :ro vì runtime chỉ ĐỌC; mọi đường tải đã bị chặn trong enrich_backends.py.
       - ${MODEL_HOST_PATH:-../_data/models}:/models:ro
     depends_on:
       postgres:

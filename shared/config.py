@@ -42,9 +42,23 @@ class Settings(BaseSettings):
     # định sẽ khiến MỌI task rơi vào 'error' trên máy chưa cài model. Bật khi node worker
     # đã có đủ model.
     enrich_on_ingest: bool = False
-    # Thư mục model PhoWhisper-large đã convert sang CTranslate2 (faster-whisper nạp theo
-    # đường dẫn). Trong container: mount trọng số vào /models (xem deploy/docker-compose.yml).
-    asr_model_dir: str = "PhoWhisper-large"
+    # Trọng số ASR/OCR nạp từ ĐĨA, không bao giờ tải lúc chạy (AD-14 air-gap) — cả ba thư
+    # viện đều mặc định tự tải về ~/.cache. Dựng bằng `deploy/fetch-models.sh` trên máy có
+    # Internet rồi copy sang node. Trong container: mount vào /models (docker-compose.yml).
+    # PhoWhisper-large đã convert CTranslate2 (faster-whisper nạp theo đường dẫn thư mục).
+    asr_model_dir: str = "./_data/models/PhoWhisper-large-ct2"
+    # Tắt riêng OCR, vẫn chạy ASR. Dùng khi trọng số OCR chưa nạp được trên node: OCR
+    # không chạy thì KHÔNG ghi gì vào scene.ocr_text (AD-5), nên kết quả OCR của lượt
+    # trước không bị xoá. ASR không có cờ riêng — tắt ASR = tắt luôn enrich_on_ingest.
+    enrich_ocr: bool = True
+    # Thư mục chứa craft_mlt_25k.pth (phần dò vùng chữ của EasyOCR).
+    ocr_detector_dir: str = "./_data/models/easyocr"
+    # Thư mục chứa <model>.pth + <model>.yml của VietOCR (config hợp nhất, tránh gọi mạng).
+    ocr_recognizer_dir: str = "./_data/models/vietocr"
+    # 'cpu' | 'cuda' — dùng cho EasyOCR/VietOCR. faster-whisper tự dò ('auto') nên không
+    # đọc biến này. Triển khai đích là 1 node GPU (AD-14): đặt 'cuda' khi node có GPU, OCR
+    # hàng trăm keyframe/video trên CPU rất chậm.
+    enrich_device: str = "cpu"
     # Crash-recovery (Story 1.7, NFR-2/AD-18): [ASSUMPTION] lease 15 phút, tối đa 3 lần thử
     task_lease_seconds: int = Field(default=900, gt=0)
     task_max_attempts: int = Field(default=3, gt=0)

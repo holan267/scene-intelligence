@@ -53,9 +53,18 @@ def _build_enrich_ports(settings, storage):
     from pipeline.enrich_backends import PhoWhisperTranscriber, VietOcrReader
 
     transcriber = PhoWhisperTranscriber(storage=storage, model_dir=settings.asr_model_dir)
-    ocr = VietOcrReader()
+    ocr = None
+    if settings.enrich_ocr:
+        ocr = VietOcrReader(
+            detector_dir=settings.ocr_detector_dir,
+            recognizer_dir=settings.ocr_recognizer_dir,
+            device=settings.enrich_device,
+        )
     assert_vietnamese_models(transcriber, ocr)  # AD-9
-    log.info("enrich ASR/OCR bật (PhoWhisper-large + VietOCR)", extra={"stage": "worker-boot"})
+    log.info(
+        "enrich bật: PhoWhisper-large" + (" + VietOCR" if ocr else " (ASR-only, OCR tắt)"),
+        extra={"stage": "worker-boot"},
+    )
     return transcriber, ocr
 
 

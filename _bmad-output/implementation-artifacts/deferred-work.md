@@ -1,5 +1,13 @@
 # Deferred Work
 
+## Deferred from: nối stage ASR/OCR vào worker (2026-09-23)
+
+- **ASR decode lại TOÀN BỘ audio cho mỗi scene** [pipeline/enrich_backends.py] — `model.transcribe(path, clip_timestamps=...)` decode cả file rồi mới cắt đoạn; log lượt chạy tet2026_02.mp4 cho thấy `Processing audio with duration 00:38.591` lặp đúng bằng số scene (21 lần). Chi phí decode là O(số scene × thời lượng video): video tin tức 1 giờ với 500 scene sẽ decode ~500 giờ audio chỉ để lấy ra 1 giờ. *(Defer: faster-whisper nhận được ndarray nên fix là decode 1 lần/video rồi truyền lát cắt, nhưng đổi hợp đồng `Transcriber` port — cần làm cùng lúc với đo trên video dài thật.)*
+- **Không có đường chạy lại RIÊNG stage enrich** [pipeline/workers.py, api/routes_ingest.py] — muốn enrich lại một video đã `done` phải re-queue cả `ingest_task`, kéo theo detect chạy lại (decode + trích keyframe) dù ranh giới scene không đổi. Gặp ngay khi bật ASR cho video đã detect từ lượt trước. *(Defer: cần endpoint/CLI `re-enrich <video_id>` và mô hình trạng thái per-stage thay vì chỉ per-task; lớn hơn phạm vi wiring hiện tại.)*
+- **Trùng dylib ffmpeg giữa `cv2` và `av`** [pyproject.toml] — bật extra `enrich` làm hai bản libavdevice cùng nạp (`cv2/.dylibs/libavdevice.61` và `av/.dylibs/libavdevice.62`), runtime cảnh báo "may cause spurious casting failures and mysterious crashes". Lượt chạy thật chưa gặp crash. *(Defer: theo dõi; nếu gặp thì ghim opencv/av dùng chung bản ffmpeg, hoặc tách detect và enrich thành hai tiến trình.)*
+- **Model ASR/OCR chặn event loop** [pipeline/workers.py] — `_enrich_video` gọi model đồng bộ ngay trên event loop (đã ghi rõ trong docstring). Chấp nhận được với worker đơn tiến trình MVP. *(Defer: đẩy sang thread khi worker phải chạy song song nhiều video.)*
+
+
 ## Deferred from: code review of story-3.1 (2026-07-06)
 
 - **`storage.get()` (đọc bytes keyframe) là lời gọi đồng bộ trong route handler `async def`** [api/routes_media.py] — có thể chặn event loop dưới tải cao khi nhiều request thumbnail đồng thời. *(Defer: ảnh hưởng nhỏ ở quy mô MVP (file JPEG nhỏ); fix đúng cần `run_in_threadpool` có cân nhắc, không phải patch phản xạ.)*

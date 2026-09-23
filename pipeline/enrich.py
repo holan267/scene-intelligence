@@ -37,11 +37,14 @@ def _assert_vietnamese(model: object, role: str) -> None:
         raise ValueError(f"{role} không hỗ trợ tiếng Việt (language={lang!r}) — vi phạm AD-9")
 
 
-def assert_vietnamese_models(transcriber: Transcriber, ocr: OcrReader) -> None:
+def assert_vietnamese_models(transcriber: Transcriber, ocr: OcrReader | None = None) -> None:
     """Guard AD-9 gọi được từ ngoài: fail SỚM (lúc dựng port ở worker) thay vì lặp lỗi
-    trên từng scene. `enrich_scene_vietnamese` vẫn tự guard — port có thể đến từ nơi khác."""
+    trên từng scene. `enrich_scene_vietnamese` vẫn tự guard — port có thể đến từ nơi khác.
+
+    `ocr=None` là chế độ ASR-only hợp lệ (xem enrich_scene_vietnamese), không phải lỗi."""
     _assert_vietnamese(transcriber, "ASR")
-    _assert_vietnamese(ocr, "OCR")
+    if ocr is not None:
+        _assert_vietnamese(ocr, "OCR")
 
 
 async def enrich_scene_vietnamese(
@@ -49,11 +52,17 @@ async def enrich_scene_vietnamese(
     storage: StoragePort,
     scene_id: str,
     transcriber: Transcriber,
-    ocr: OcrReader,
+    ocr: OcrReader | None = None,
 ) -> dict:
-    """ASR trên audio scene + OCR trên keyframe các shot; ghi cột riêng (idempotent overwrite)."""
+    """ASR trên audio scene + OCR trên keyframe các shot; ghi cột riêng (idempotent overwrite).
+
+    `ocr=None` => chạy ASR-only và **không đụng** `scene.ocr_text`. Đây là hệ quả trực tiếp
+    của AD-5 (mỗi stage sở hữu cột của mình): OCR không chạy thì không ghi gì, nên kết quả
+    OCR từ lượt trước không bị xoá. Dùng khi trọng số OCR chưa nạp được trên node.
+    """
     _assert_vietnamese(transcriber, "ASR")  # AD-9
-    _assert_vietnamese(ocr, "OCR")
+    if ocr is not None:
+        _assert_vietnamese(ocr, "OCR")
 
     scene = await session.get(Scene, scene_id)
     if scene is None:
@@ -64,20 +73,26 @@ async def enrich_scene_vietnamese(
 
     transcript = transcriber.transcribe(video.source_key, scene.start_ms, scene.end_ms)
 
-    shots = (
-        await session.execute(select(Shot).where(Shot.scene_id == scene_id))
-    ).scalars().all()
     texts: list[str] = []
-    seen_keys: set[str] = set()
-    for sh in shots:  # OCR trên keyframe (AD-6), lấy ảnh qua storage-port (AD-23)
-        if not sh.keyframe_key or sh.keyframe_key in seen_keys:
-            continue
-        seen_keys.add(sh.keyframe_key)
-        text = ocr.read_text(storage.get(sh.keyframe_key)).strip()
-        if text:
-            texts.append(text)
+    if ocr is not None:
+        shots = (
+            await session.execute(select(Shot).where(Shot.scene_id == scene_id))
+        ).scalars().all()
+        seen_keys: set[str] = set()
+        for sh in shots:  # OCR trên keyframe (AD-6), lấy ảnh qua storage-port (AD-23)
+            if not sh.keyframe_key or sh.keyframe_key in seen_keys:
+                continue
+            seen_keys.add(sh.keyframe_key)
+            text = ocr.read_text(storage.get(sh.keyframe_key)).strip()
+            if text:
+                texts.append(text)
 
     scene.transcript = transcript  # cột riêng (AD-5)
-    scene.ocr_text = "\n".join(texts) if texts else None
+    if ocr is not None:  # OCR không chạy => giữ nguyên giá trị cũ, không ghi None đè lên
+        scene.ocr_text = "\n".join(texts) if texts else None
     await session.flush()
-    return {"scene_id": scene_id, "transcript_len": len(transcript), "ocr_blocks": len(texts)}
+    return {
+        "scene_id": scene_id,
+        "transcript_len": len(transcript),
+        "ocr_blocks": len(texts) if ocr is not None else None,  # None = stage không chạy
+    }

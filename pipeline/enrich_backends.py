@@ -2,15 +2,35 @@
 
 - PhoWhisperTranscriber: PhoWhisper-large qua faster-whisper/CTranslate2 (SOTA Vi ASR).
 - VietOcrReader: EasyOCR (dò vùng chữ) + VietOCR (đọc chữ Việt có dấu). Đều `language="vi"` (AD-9).
-Media truy cập qua storage-port `local_path` (AD-23). Cần faster-whisper/easyocr/vietocr + ffmpeg.
+Media truy cập qua storage-port `local_path` (AD-23).
 
-Cả hai adapter nạp model LƯỜI và giữ lại cho cả vòng đời worker: pipeline.workers gọi
-`transcribe`/`read_text` theo từng scene/keyframe (hàng trăm lần cho một video tin tức),
-nạp lại mỗi lần sẽ tốn vài GB I/O + khởi tạo cho mỗi scene.
+## Trọng số: LOCAL, không bao giờ tải lúc chạy (AD-14 air-gap)
+
+Cả ba thư viện đều mặc định tự tải trọng số về `~/.cache` khi gọi lần đầu — trong container
+thì vừa gọi Internet (vỡ air-gap) vừa mất sạch sau mỗi lần restart. Adapter này chặn hết:
+
+- faster-whisper: `WhisperModel("tên-không-phải-thư-mục")` coi đó là repo-id HuggingFace và
+  tải về. Thư mục model được kiểm tra TRƯỚC nên trường hợp đó fail rõ ràng thay vì âm thầm
+  tải. Thiếu `tokenizer.json` trong thư mục đã convert thì faster-whisper cũng tự tải
+  `openai/whisper-tiny` — `deploy/fetch-models.sh` bảo đảm file này luôn có.
+- EasyOCR: `download_enabled=False` + `model_storage_directory` trỏ vào trọng số đã nạp sẵn.
+- VietOCR: `Cfg.load_config_from_name()` tải YAML config TỪ MẠNG, và `Predictor` tải `.pth`
+  khi `weights` bắt đầu bằng `http`. Nên đọc config từ file YAML đã nạp sẵn và ép `weights`
+  thành đường dẫn tuyệt đối local.
+
+Kiểm tra đường dẫn đặt TRƯỚC import thư viện: báo lỗi hữu ích ngay cả trên máy chưa cài
+faster-whisper/easyocr/vietocr, và cho phép test guard mà không cần trọng số thật.
+
+Trọng số lấy ở đâu: chạy `deploy/fetch-models.sh` trên máy CÓ Internet rồi copy thư mục
+sang node air-gap. Xem deploy/README.md.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from shared.storage import StoragePort, build_storage
+
+_FETCH_HINT = "Chạy `deploy/fetch-models.sh` trên máy có Internet rồi copy sang node này"
 
 
 class PhoWhisperTranscriber:
@@ -19,7 +39,7 @@ class PhoWhisperTranscriber:
     def __init__(
         self,
         storage: StoragePort | None = None,
-        model_dir: str = "PhoWhisper-large",
+        model_dir: str = "./_data/models/PhoWhisper-large-ct2",
         device: str = "auto",
         compute_type: str = "default",
     ) -> None:
@@ -29,18 +49,38 @@ class PhoWhisperTranscriber:
         self._compute_type = compute_type
         self._model = None
 
-    def _lazy(self):  # pragma: no cover - phụ thuộc production
-        if self._model is None:
-            try:
-                from faster_whisper import WhisperModel
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Cần cài `faster-whisper` (+ PhoWhisper-large convert CTranslate2)"
-                ) from exc
-            self._model = WhisperModel(
-                self._model_dir, device=self._device, compute_type=self._compute_type
+    def _lazy(self):
+        """Nạp model MỘT lần cho cả vòng đời worker.
+
+        enrich gọi `transcribe()` theo từng scene (hàng trăm lần cho một video tin tức);
+        khởi tạo lại mỗi lần là vài GB I/O cho mỗi scene.
+        """
+        if self._model is not None:
+            return self._model
+
+        model_dir = Path(self._model_dir)
+        if not model_dir.is_dir():
+            raise RuntimeError(
+                f"Không thấy thư mục model PhoWhisper đã convert CTranslate2: {self._model_dir!r}. "
+                f"{_FETCH_HINT} (ASR_MODEL_DIR). Để faster-whisper tự tải từ HuggingFace là "
+                "vỡ air-gap (AD-14)."
             )
-        return self._model
+        if not (model_dir / "tokenizer.json").is_file():
+            raise RuntimeError(
+                f"Thiếu tokenizer.json trong {self._model_dir!r} — faster-whisper sẽ tải "
+                f"`openai/whisper-tiny` từ HuggingFace lúc chạy (vỡ air-gap, AD-14). {_FETCH_HINT}."
+            )
+
+        try:  # pragma: no cover - phụ thuộc production
+            from faster_whisper import WhisperModel
+        except ImportError as exc:  # pragma: no cover - phụ thuộc production
+            raise RuntimeError(
+                "Cần cài `faster-whisper`: `uv pip install -e '.[enrich]'`"
+            ) from exc
+        self._model = WhisperModel(  # pragma: no cover - phụ thuộc production
+            str(model_dir), device=self._device, compute_type=self._compute_type
+        )
+        return self._model  # pragma: no cover - phụ thuộc production
 
     def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:  # pragma: no cover - phụ thuộc production
         model = self._lazy()
@@ -57,39 +97,95 @@ class VietOcrReader:
 
     Tách đôi vì recognizer 'vi' sẵn có của EasyOCR đọc dấu tiếng Việt kém hơn hẳn VietOCR
     (vgg_transformer) — chữ chạy dưới màn hình tin tức gần như luôn có dấu.
+
+    `detector_dir`/`recognizer_dir` không có giá trị mặc định: đường dẫn trọng số là hợp
+    đồng air-gap, để lẫn một mặc định sai sẽ khiến cấu hình hỏng trôi tới tận runtime.
     """
 
     language = "vi"
 
-    def __init__(self, model_name: str = "vgg_transformer", device: str = "cpu") -> None:
-        self._detector = None
-        self._recognizer = None
+    def __init__(
+        self,
+        detector_dir: str,
+        recognizer_dir: str,
+        model_name: str = "vgg_transformer",
+        device: str = "cpu",
+    ) -> None:
+        self._detector_dir = detector_dir
+        self._recognizer_dir = recognizer_dir
         self._model_name = model_name
         self._device = device
+        self._detector = None
+        self._recognizer = None
 
-    def _lazy(self):  # pragma: no cover - phụ thuộc production
-        if self._detector is None:
-            import easyocr
+    def _weights_path(self) -> Path:
+        return Path(self._recognizer_dir) / f"{self._model_name}.pth"
 
-            # recognizer=False: chỉ nạp phần dò vùng chữ (CRAFT), phần đọc để VietOCR lo.
-            self._detector = easyocr.Reader(
-                ["vi"], gpu=self._device != "cpu", recognizer=False
+    def _config_path(self) -> Path:
+        return Path(self._recognizer_dir) / f"{self._model_name}.yml"
+
+    def _lazy(self):
+        if self._detector is not None and self._recognizer is not None:
+            return self._detector, self._recognizer
+
+        # Kiểm tra TRƯỚC khi import: lỗi thiếu trọng số phải nói rõ phải làm gì.
+        detector_dir = Path(self._detector_dir)
+        if not (detector_dir / "craft_mlt_25k.pth").is_file():
+            raise RuntimeError(
+                f"Không thấy trọng số dò chữ EasyOCR (craft_mlt_25k.pth) trong "
+                f"{self._detector_dir!r}. {_FETCH_HINT} (OCR_DETECTOR_DIR)."
             )
-        if self._recognizer is None:
-            from vietocr.tool.config import Cfg
-            from vietocr.tool.predictor import Predictor
+        for path, what in ((self._weights_path(), "trọng số"), (self._config_path(), "config")):
+            if not path.is_file():
+                raise RuntimeError(
+                    f"Không thấy {what} VietOCR: {str(path)!r}. {_FETCH_HINT} "
+                    "(OCR_RECOGNIZER_DIR)."
+                )
 
-            cfg = Cfg.load_config_from_name(self._model_name)
-            cfg["device"] = self._device
-            cfg["predictor"]["beamsearch"] = False  # greedy: nhanh hơn nhiều, đủ cho chữ chạy
-            self._recognizer = Predictor(cfg)
+        self._detector = self._build_detector(detector_dir)
+        self._recognizer = self._build_recognizer()
         return self._detector, self._recognizer
 
-    def read_text(self, image: bytes) -> str:  # pragma: no cover - phụ thuộc production
+    def _build_detector(self, detector_dir: Path):  # pragma: no cover - phụ thuộc production
         try:
-            detector, recognizer = self._lazy()
+            import easyocr
         except ImportError as exc:
-            raise RuntimeError("Cần cài `easyocr` + `vietocr` để OCR tiếng Việt") from exc
+            raise RuntimeError("Cần cài `easyocr`: `uv pip install -e '.[enrich]'`") from exc
+        # recognizer=False: chỉ nạp phần dò vùng chữ (CRAFT), phần đọc để VietOCR lo.
+        # download_enabled=False: thiếu trọng số thì fail, TUYỆT ĐỐI không tải (AD-14).
+        return easyocr.Reader(
+            ["vi"],
+            gpu=self._device != "cpu",
+            recognizer=False,
+            model_storage_directory=str(detector_dir),
+            download_enabled=False,
+            verbose=False,
+        )
+
+    def _build_recognizer(self):  # pragma: no cover - phụ thuộc production
+        try:
+            import yaml
+            from vietocr.tool.config import Cfg
+            from vietocr.tool.predictor import Predictor
+        except ImportError as exc:
+            raise RuntimeError("Cần cài `vietocr`: `uv pip install -e '.[enrich]'`") from exc
+
+        # Đọc YAML đã nạp sẵn thay vì Cfg.load_config_from_name() — hàm đó GỌI MẠNG để lấy
+        # config. fetch-models.sh đã ghi ra bản config hợp nhất (base + model).
+        with self._config_path().open(encoding="utf-8") as fh:
+            cfg = Cfg(yaml.safe_load(fh))
+        # Predictor chỉ tải khi weights bắt đầu bằng 'http' -> đường tuyệt đối = không tải.
+        cfg["weights"] = str(self._weights_path().resolve())
+        cfg["device"] = self._device
+        cfg["predictor"]["beamsearch"] = False  # greedy: nhanh hơn nhiều, đủ cho chữ chạy
+        return Predictor(cfg)
+
+    def read_text(self, image: bytes) -> str:
+        detector, recognizer = self._lazy()
+        return self._read(detector, recognizer, image)
+
+    @staticmethod
+    def _read(detector, recognizer, image: bytes) -> str:  # pragma: no cover - phụ thuộc production
         import cv2
         import numpy as np
         from PIL import Image

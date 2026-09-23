@@ -19,6 +19,24 @@ dependencies = [
     "scenedetect[opencv-headless]>=0.6.4,<0.7",
 ]
 
+[project.optional-dependencies]
+# Stage enrich (ASR + OCR) — TÁCH RIÊNG khỏi dependencies chính vì kéo theo torch:
+# thêm ~2-3 GB vào image, trong khi API và bước detect hoàn toàn không cần.
+# Node worker có bật ENRICH_ON_INGEST mới cần: `uv pip install -e '.[enrich]'`.
+# Trọng số KHÔNG nằm trong các gói này — xem deploy/fetch-models.sh.
+enrich = [
+    "faster-whisper>=1.1",   # PhoWhisper-large chạy qua CTranslate2
+    "easyocr>=1.7",          # chỉ dùng phần dò vùng chữ (CRAFT)
+    "vietocr>=0.3.13",       # bản Python pbcquoc, KHÔNG phải app Java trùng tên
+]
+# Chỉ cần trên máy CÓ Internet dùng để dựng trọng số (deploy/fetch-models.sh), không cần
+# trên node chạy production. ct2-transformers-converter đi kèm ctranslate2.
+fetch-models = [
+    "transformers>=4.44",
+    "huggingface-hub>=0.26",
+    "ctranslate2>=4.5",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
