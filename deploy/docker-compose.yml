@@ -1,4 +1,12 @@
 # On-prem, 1 node, air-gap được (AD-14). Không dịch vụ cloud runtime.
+#
+# Worker KHÔNG nằm trong compose: chạy TRÊN HOST bằng `deploy/run-worker.sh`.
+# Lý do: stage enrich nạp PhoWhisper-large in-process (~6 GB vì CTranslate2 buộc phải
+# convert float16 -> float32 trên CPU không hỗ trợ fp16), còn describe/embed gọi sang
+# Ollama cũng ở host. Đóng gói worker vào image kéo theo torch (+~3 GB) rồi vẫn phải
+# mount cả media lẫn trọng số ra ngoài — không được gì mà tốn thêm một tầng.
+# Migration `alembic upgrade head` do service `api` chạy (deploy/entrypoint.sh), nên
+# worker host không cần tự chạy.
 services:
   postgres:
     image: pgvector/pgvector:pg18   # PostgreSQL 18 + pgvector 0.8.x (AD-4)
@@ -39,52 +47,6 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
-
-  worker:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      args:
-        # true => image worker có thêm faster-whisper/easyocr/vietocr (+~2-3 GB vì torch).
-        # Bắt buộc bật cùng ENRICH_ON_INGEST, nếu không stage enrich sẽ fail lúc nạp model.
-        INSTALL_ENRICH: ${INSTALL_ENRICH:-false}
-    environment:
-      DATABASE_URL: postgresql+psycopg://scene:scene@postgres:5432/scene_intelligence
-      MEDIA_BACKEND: filesystem
-      MEDIA_ROOT: /data/media
-      API_ENV: dev
-      EMBED_MODEL_URL: ${EMBED_MODEL_URL:-http://host.docker.internal:11434}
-      # Detect chạy trong worker (PySceneDetect/OpenCV, CPU) — không cần model server.
-      DETECT_ON_INGEST: ${DETECT_ON_INGEST:-true}
-      DETECT_THRESHOLD: ${DETECT_THRESHOLD:-27.0}
-      # ASR (PhoWhisper-large) + OCR (VietOCR) cũng chạy TRONG worker, không qua model
-      # server: cả hai nạp model in-process chứ không có endpoint OpenAI-compatible.
-      # Mặc định TẮT. Cần CẢ HAI: INSTALL_ENRICH=true (thư viện) + trọng số trong /models
-      # (dựng bằng deploy/fetch-models.sh). Thiếu một trong hai => task rơi vào 'error'
-      # kèm thông báo chỉ rõ thiếu gì.
-      ENRICH_ON_INGEST: ${ENRICH_ON_INGEST:-false}
-      # false => chỉ chạy ASR, KHÔNG đụng scene.ocr_text (dùng khi trọng số OCR chưa sẵn).
-      ENRICH_OCR: ${ENRICH_OCR:-true}
-      ASR_MODEL_DIR: ${ASR_MODEL_DIR:-/models/PhoWhisper-large-ct2}
-      OCR_DETECTOR_DIR: ${OCR_DETECTOR_DIR:-/models/easyocr}
-      OCR_RECOGNIZER_DIR: ${OCR_RECOGNIZER_DIR:-/models/vietocr}
-      # cpu | cuda — EasyOCR/VietOCR. Node có GPU thì đặt cuda (OCR hàng trăm keyframe/video).
-      ENRICH_DEVICE: ${ENRICH_DEVICE:-cpu}
-      # describe (Qwen3-VL) + embed/index (BGE-M3): stage DUY NHẤT set search_status=
-      # 'indexed' (AD-17). Tắt => scene nạp xong vẫn ở 'pending' và search trả rỗng.
-      # Khác ASR/OCR: hai model này chạy NGOÀI worker trên model server (AD-14) nên không
-      # cần INSTALL_ENRICH, nhưng cần cả hai URL dưới đây trỏ tới server đang sống.
-      INDEX_ON_INGEST: ${INDEX_ON_INGEST:-false}
-      DESCRIBE_MODEL_URL: ${DESCRIBE_MODEL_URL:-http://host.docker.internal:8001}
-    volumes:
-      - ${MEDIA_HOST_PATH:-../_data/media}:/data/media
-      # Trọng số model để ngoài image (nặng, không commit) — nạp sẵn cho air-gap (AD-14).
-      # :ro vì runtime chỉ ĐỌC; mọi đường tải đã bị chặn trong enrich_backends.py.
-      - ${MODEL_HOST_PATH:-../_data/models}:/models:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: ["sh", "-c", "alembic upgrade head && python -m pipeline.worker_main"]
 
 volumes:
   pgdata:

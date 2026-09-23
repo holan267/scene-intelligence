@@ -19,14 +19,29 @@ class Settings(BaseSettings):
     api_env: str = "dev"
     # Model servers (AD-14) — endpoint OpenAI-compatible (Story 1.6).
     # Dev 1 máy (Apple Silicon: vLLM cần CUDA, không chạy native) dùng Ollama làm model
-    # server: `ollama serve` mở cổng 11434 với /v1/embeddings tương thích OpenAI. Ollama
-    # match tên model KHÔNG phân biệt hoa/thường nên `"model": "BGE-M3"` hardcode trong
-    # adapter khớp đúng `bge-m3:latest`, trả dense 1024 chiều = SCENE_EMBEDDING_DIM.
+    # server: `ollama serve` mở cổng 11434, phục vụ CẢ describe lẫn embed qua
+    # /v1/chat/completions + /v1/embeddings tương thích OpenAI. Vì vậy describe_model_url
+    # và embed_model_url TRÙNG NHAU ở dev — model nào chạy do tên trong payload quyết
+    # định, không phải cổng (xem `describe_model_name` dưới đây và tên BGE-M3 hardcode
+    # trong pipeline/embed_backends.py).
     # Từ TRONG container phải dùng host.docker.internal thay cho localhost (localhost trỏ
-    # vào chính container) — xem EMBED_MODEL_URL trong deploy/docker-compose.yml.
-    # On-prem GPU thật: trỏ sang vLLM/TEI riêng (cổng 8001-8003 như thiết kế ban đầu).
-    describe_model_url: str = "http://localhost:8001"
+    # vào chính container) — xem DESCRIBE/EMBED_MODEL_URL trong deploy/docker-compose.yml.
+    # On-prem GPU thật: tách lại thành vLLM/TEI riêng (cổng 8001-8003 như thiết kế ban
+    # đầu) — chỉ đổi env, code không cần sửa.
+    describe_model_url: str = "http://localhost:11434"
     embed_model_url: str = "http://localhost:11434"
+    # Tên model describe gửi trong payload — phải khớp tag Ollama đang phục vụ (hoặc
+    # `--served-model-name` của vLLM). KHÔNG phải tag gốc `qwen3-vl:2b`: qwen3-vl là model
+    # *thinking* còn Ollama mặc định num_ctx=4096. Một keyframe đã ngốn ~2.1k token prompt,
+    # phần "suy nghĩ" ăn nốt chỗ còn lại rồi chạm trần -> finish_reason='length' và content
+    # RỖNG -> describe raise -> scene kẹt ở 'pending' (AD-17), không có lần gọi embeddings
+    # nào cho scene đó. Nới cửa sổ ngữ cảnh KHÔNG làm được qua /v1 (Ollama bỏ qua
+    # `options.num_ctx` ở lớp OpenAI-compat, cả `think`/`reasoning_effort` cũng vậy) nên
+    # num_ctx phải được nướng sẵn vào một tag dẫn xuất — deploy/run-worker.sh tự tạo tag
+    # này qua /api/create nếu chưa có. Tự tạo tay:
+    #   curl http://localhost:11434/api/create -d '{"model":"qwen3-vl:2b-ctx16k",
+    #     "from":"qwen3-vl:2b","parameters":{"num_ctx":16384}}'
+    describe_model_name: str = "qwen3-vl:2b-ctx16k"
     rerank_model_url: str = "http://localhost:8003"
     # Detect (Story 1.3): worker chạy tách scene/shot ngay sau khi đăng ký Video.
     # Tắt (DETECT_ON_INGEST=false) khi chỉ muốn nạp danh mục video mà chưa decode.

@@ -6,3 +6,6 @@ _data/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# Cấu hình worker host riêng theo máy (deploy/run-worker.sh)
+deploy/worker.local.env

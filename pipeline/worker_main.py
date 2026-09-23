@@ -88,7 +88,7 @@ def _build_index_ports(settings):
     from pipeline.embed_backends import BgeM3Embedder
 
     log.info(
-        f"index bật: Qwen3-VL @ {settings.describe_model_url}, "
+        f"index bật: {settings.describe_model_name} @ {settings.describe_model_url}, "
         f"BGE-M3 @ {settings.embed_model_url}",
         extra={"stage": "worker-boot"},
     )

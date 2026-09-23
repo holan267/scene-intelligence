@@ -153,31 +153,61 @@ có GPU — OCR hàng trăm keyframe mỗi video trên CPU rất chậm. (compos
   của bản fine-tune mới là thứ có hiệu lực — rà trước khi bán ra ngoài.
 - EasyOCR (Apache-2.0) và VietOCR (Apache-2.0) thì sạch.
 
-## Model server BGE-M3 (bắt buộc cho search & bước embed của pipeline)
+## Model server BGE-M3 + Qwen3-VL (bắt buộc cho search & stage index của pipeline)
 
-BGE-M3 **không** nằm trong compose: nó cần GPU/Metal của máy host mà container không có.
-Trên máy dev 1 node (nhất là Apple Silicon — vLLM cần CUDA, không chạy native; image CPU của
-TEI/Infinity chỉ có bản amd64) thì chạy bằng **Ollama trên host**:
+Hai model này **không** nằm trong compose: chúng cần GPU/Metal của máy host mà container
+không có. Trên máy dev 1 node (nhất là Apple Silicon — vLLM cần CUDA, không chạy native;
+image CPU của TEI/Infinity chỉ có bản amd64) thì chạy bằng **Ollama trên host**. Một tiến
+trình `ollama serve` phục vụ CẢ HAI trên cùng cổng 11434 — model nào chạy do **tên trong
+payload** quyết định, không phải cổng:
 
 ```bash
-ollama pull bge-m3        # ~1.2 GB, weights nằm local => vẫn air-gap được sau lần tải đầu
-ollama serve              # mở cổng 11434
+ollama pull bge-m3        # ~1.2 GB — embed scene_document + câu truy vấn
+ollama pull qwen3-vl:2b   # ~2.4 GB — sinh Scene Document từ keyframe (describe)
+ollama serve              # mở cổng 11434 cho cả hai
+
+# Tag dẫn xuất có num_ctx nới rộng — ĐÂY mới là tag worker gửi (xem cảnh báo bên dưới).
+# deploy/run-worker.sh tự chạy lệnh này nếu tag chưa tồn tại.
+curl http://localhost:11434/api/create \
+  -d '{"model":"qwen3-vl:2b-ctx16k","from":"qwen3-vl:2b","parameters":{"num_ctx":16384}}'
+
 curl http://localhost:11434/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model":"BGE-M3","input":"thử"}'   # kỳ vọng data[0].embedding dài 1024
+
+curl http://localhost:11434/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-vl:2b-ctx16k","messages":[{"role":"user","content":"xin chào"}]}'
 ```
 
-Ollama cung cấp `/v1/embeddings` tương thích OpenAI, và **match tên model không phân biệt
-hoa/thường**, nên `{"model": "BGE-M3"}` mà adapter gửi khớp đúng `bge-m3:latest` — không cần
-sửa payload. Dense 1024 chiều đúng bằng `SCENE_EMBEDDING_DIM`.
+Ollama cung cấp `/v1/embeddings` + `/v1/chat/completions` tương thích OpenAI (kể cả
+`image_url` dạng `data:image/jpeg;base64,...` mà `Qwen3VLDescriber` gửi).
 
-Container trỏ tới host qua `EMBED_MODEL_URL` (đã có mặc định trong compose):
+> ⚠️ **Tên model phải khớp tag.** Ollama match tên không phân biệt hoa/thường nên
+> `{"model": "BGE-M3"}` khớp `bge-m3:latest`, nhưng **tag đầy đủ là bắt buộc** với
+> Qwen3-VL: không có `qwen3-vl:latest`, gửi `"Qwen3-VL"` trần sẽ trả 404. Xem
+> `pipeline/describe_backends.py`.
+
+> ⚠️ **num_ctx mặc định 4096 là quá nhỏ — phải dùng tag dẫn xuất.** qwen3-vl là model
+> *thinking*: nó xả phần suy nghĩ ra trước rồi mới viết câu trả lời. Một keyframe đã chiếm
+> ~2.1k token prompt, nên với num_ctx=4096 phần suy nghĩ ăn nốt chỗ còn lại và request kết
+> thúc bằng `finish_reason="length"` với `content` **rỗng**. Triệu chứng ở worker rất dễ
+> đọc nhầm: log có N lần `chat/completions` nhưng chỉ vài lần `embeddings`, phần lớn scene
+> kẹt ở `search_status='pending'`, `ingest_task.reason` ghi *"Qwen3-VL trả nội dung rỗng"*
+> — trông như lỗi ở bước embed dù bước describe mới là chỗ chết. `options.num_ctx` trong
+> payload **không có tác dụng**: lớp OpenAI-compat của Ollama bỏ qua nó (cả `think` lẫn
+> `reasoning_effort` cũng vậy), nên num_ctx phải được nướng vào tag bằng `/api/create` như
+> trên. Đo trên 3 keyframe thật: 4096 hỏng 2/3 scene, 8192 vẫn có lần bị cắt giữa câu,
+> 16384 đủ cho cả 3.
+
+Container trỏ tới host qua hai biến (đã có mặc định trong compose):
 
 ```
 EMBED_MODEL_URL=http://host.docker.internal:11434
+DESCRIBE_MODEL_URL=http://host.docker.internal:11434
 ```
 
-> ⚠️ **Đừng dùng `localhost` trong `EMBED_MODEL_URL`.** Trong container `localhost` là chính
+> ⚠️ **Đừng dùng `localhost` trong hai biến này.** Trong container `localhost` là chính
 > container đó, nên API sẽ trả
 > `502 {"message": "Gọi BGE-M3 thất bại: All connection attempts failed"}`.
 > Lỗi 502 này cũng xuất hiện khi Ollama chưa chạy — kiểm tra bằng
@@ -186,14 +216,15 @@ EMBED_MODEL_URL=http://host.docker.internal:11434
 Ollama phải đang chạy mỗi khi search hoặc chạy pipeline. Cách bền: bật Ollama.app khởi động
 cùng máy, hoặc giữ `ollama serve` trong một launch agent / tmux session riêng.
 
-Khi triển khai on-prem có GPU NVIDIA thật thì đổi `EMBED_MODEL_URL` sang model server
-vLLM/TEI riêng (cổng 8002 như thiết kế AD-14) — code không cần sửa.
+Khi triển khai on-prem có GPU NVIDIA thật thì tách lại thành hai model server vLLM/TEI riêng
+(cổng 8001/8002 như thiết kế AD-14) — chỉ đổi env, code không cần sửa. Với vLLM nhớ đặt
+`--served-model-name` khớp với `DESCRIBE_MODEL_NAME` mà adapter gửi (vLLM đặt cửa sổ ngữ
+cảnh qua `--max-model-len` nên không cần tag dẫn xuất — chỉ cần đủ rộng cho prompt có ảnh).
 
-⚠️ `describe_model_url` (Qwen3-VL, 8001) và `rerank_model_url` (bge-reranker-v2-m3, 8003)
-**vẫn chưa có server nào**. Search trả kết quả đúng khi DB rỗng hoặc khi rerank bị bỏ qua
-theo `rerank_skip_gap`, nhưng sẽ trả cùng lỗi 502 ở nhánh rerank khi đã có dữ liệu thật:
-Ollama không có API rerank nên bge-reranker-v2-m3 cần server khác (TEI `/rerank`, hoặc tự
-bọc `FlagEmbedding`).
+⚠️ `rerank_model_url` (bge-reranker-v2-m3, 8003) **vẫn chưa có server nào**. Search trả kết
+quả đúng khi DB rỗng hoặc khi rerank bị bỏ qua theo `rerank_skip_gap`, nhưng sẽ trả lỗi 502
+ở nhánh rerank khi đã có dữ liệu thật: Ollama không có API rerank nên bge-reranker-v2-m3 cần
+server khác (TEI `/rerank`, hoặc tự bọc `FlagEmbedding`).
 
 ## Backup (NFR-9, AD-22)
 
