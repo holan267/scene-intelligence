@@ -31,7 +31,7 @@ class BgeRerankerV2M3:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{self._settings.rerank_model_url}/v1/rerank",
-                    json={"model": "bge-reranker-v2-m3", "query": query, "documents": passages},
+                    json={"model": "qllama/bge-reranker-v2-m3", "query": query, "documents": passages},
                 )
             response.raise_for_status()
             results = response.json()["results"]

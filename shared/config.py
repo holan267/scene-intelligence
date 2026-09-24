@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     #   curl http://localhost:11434/api/create -d '{"model":"qwen3-vl:2b-ctx16k",
     #     "from":"qwen3-vl:2b","parameters":{"num_ctx":16384}}'
     describe_model_name: str = "qwen3-vl:2b-ctx16k"
-    rerank_model_url: str = "http://localhost:8003"
+    rerank_model_url: str = "http://host.docker.internal:8090"
     # Detect (Story 1.3): worker chạy tách scene/shot ngay sau khi đăng ký Video.
     # Tắt (DETECT_ON_INGEST=false) khi chỉ muốn nạp danh mục video mà chưa decode.
     detect_on_ingest: bool = True
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # Enrich tiếng Việt (Story 1.4 wiring): worker chạy ASR (PhoWhisper-large) + OCR
     # (VietOCR) cho từng scene ngay sau detect.
     # Mặc định TẮT — khác detect_on_ingest: `scenedetect` là dependency cứng của project,
-    # còn faster-whisper/easyocr/vietocr + trọng số PhoWhisper-large (convert CTranslate2)
+    # còn faster-whisper/easyocr/ietocr + trọng số PhoWhisper-large (convert CTranslate2)
     # KHÔNG nằm trong pyproject (nặng, tải riêng theo node cho air-gap AD-14). Bật mặc
     # định sẽ khiến MỌI task rơi vào 'error' trên máy chưa cài model. Bật khi node worker
     # đã có đủ model.
