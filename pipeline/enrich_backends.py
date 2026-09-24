@@ -18,6 +18,14 @@ thì vừa gọi Internet (vỡ air-gap) vừa mất sạch sau mỗi lần rest
   khi `weights` bắt đầu bằng `http`. Nên đọc config từ file YAML đã nạp sẵn và ép `weights`
   thành đường dẫn tuyệt đối local.
 
+## Thiết bị: CPU hoặc CUDA, KHÔNG có Metal/MPS
+
+CTranslate2 (backend của faster-whisper) không có backend Metal, nên trên Apple Silicon chỉ
+còn đường CPU — `device="mps"` bị chặn ngay ở `_lazy()` với thông báo rõ ràng. Trọng số
+fetch-models.sh dựng ra là float16: nạp trên CPU thì ctranslate2 tự nở ngược lên float32
+(`compute type ... converted to float32`), tốn gấp đôi RAM và chậm hơn. Đặt
+`compute_type="int8"` để lượng tử hoá ngay lúc nạp, không cần convert lại trọng số.
+
 Kiểm tra đường dẫn đặt TRƯỚC import thư viện: báo lỗi hữu ích ngay cả trên máy chưa cài
 faster-whisper/easyocr/vietocr, và cho phép test guard mà không cần trọng số thật.
 
@@ -40,8 +48,8 @@ class PhoWhisperTranscriber:
         self,
         storage: StoragePort | None = None,
         model_dir: str = "./_data/models/PhoWhisper-large-ct2",
-        device: str = "auto",
-        compute_type: str = "default",
+        device: str = "auto",  # 'auto' | 'cpu' | 'cuda' — CTranslate2 không có Metal/MPS
+        compute_type: str = "default",  # 'int8' trên CPU, 'float16' trên GPU
     ) -> None:
         self._storage = storage or build_storage()
         self._model_dir = model_dir
@@ -69,6 +77,13 @@ class PhoWhisperTranscriber:
             raise RuntimeError(
                 f"Thiếu tokenizer.json trong {self._model_dir!r} — faster-whisper sẽ tải "
                 f"`openai/whisper-tiny` từ HuggingFace lúc chạy (vỡ air-gap, AD-14). {_FETCH_HINT}."
+            )
+
+        if self._device == "mps":
+            raise RuntimeError(
+                "ASR_DEVICE='mps' không dùng được: CTranslate2 (backend của faster-whisper) "
+                "chỉ có CPU và CUDA, không có backend Metal. Trên Apple Silicon đặt "
+                "ASR_DEVICE=cpu kèm ASR_COMPUTE_TYPE=int8."
             )
 
         try:  # pragma: no cover - phụ thuộc production

@@ -6,6 +6,9 @@ lỗi "thiếu trọng số" thành lượt tải ngầm từ Internet trên nod
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from pipeline.enrich_backends import PhoWhisperTranscriber, VietOcrReader
@@ -16,8 +19,15 @@ class DummyStorage:
         return f"/media/{media_key}"
 
 
-def _asr(model_dir) -> PhoWhisperTranscriber:
-    return PhoWhisperTranscriber(storage=DummyStorage(), model_dir=str(model_dir))
+def _asr(model_dir, **kwargs) -> PhoWhisperTranscriber:
+    return PhoWhisperTranscriber(storage=DummyStorage(), model_dir=str(model_dir), **kwargs)
+
+
+def _ready_model_dir(tmp_path):
+    """Thư mục model qua được guard air-gap (model.bin + tokenizer.json)."""
+    (tmp_path / "model.bin").write_bytes(b"x")
+    (tmp_path / "tokenizer.json").write_text("{}")
+    return tmp_path
 
 
 def test_asr_rejects_missing_model_dir(tmp_path):
@@ -72,3 +82,29 @@ def test_ocr_ad9_language_tag_survives_construction(tmp_path):
     # AD-9: worker_main guard đọc .language lúc boot, TRƯỚC khi nạp trọng số
     assert _ocr(tmp_path, tmp_path).language == "vi"
     assert _asr(tmp_path).language == "vi"
+
+
+def test_asr_rejects_mps_device(tmp_path):
+    # CTranslate2 không có backend Metal: 'mps' phải fail ở boot với hướng dẫn cpu+int8,
+    # thay vì một lỗi khó hiểu từ thư viện sau khi đã nạp xong worker.
+    with pytest.raises(RuntimeError, match="ASR_COMPUTE_TYPE=int8"):
+        _asr(_ready_model_dir(tmp_path), device="mps")._lazy()
+
+
+def test_asr_passes_device_and_compute_type_to_faster_whisper(tmp_path, monkeypatch):
+    # Khoá đường dây cấu hình: ASR_DEVICE/ASR_COMPUTE_TYPE phải tới được WhisperModel.
+    # Rơi ngược về mặc định 'default' nghĩa là trọng số float16 nở lên float32 trên CPU —
+    # im lặng, chỉ thấy qua một dòng cảnh báo của ctranslate2.
+    seen = {}
+
+    class FakeWhisperModel:
+        def __init__(self, model_dir, device, compute_type):
+            seen.update(model_dir=model_dir, device=device, compute_type=compute_type)
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeWhisperModel)
+    )
+    model_dir = _ready_model_dir(tmp_path)
+    _asr(model_dir, device="cpu", compute_type="int8")._lazy()
+
+    assert seen == {"model_dir": str(model_dir), "device": "cpu", "compute_type": "int8"}

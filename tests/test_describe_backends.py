@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from pipeline.describe_backends import Qwen3VLDescriber
+from pipeline.describe_backends import DeepSeekDescriber, Qwen3VLDescriber, build_describer
 from shared.config import Settings
 
 
@@ -30,9 +30,10 @@ def _patch_post(monkeypatch, payload: dict) -> dict:
     """Thay httpx.post, trả về dict ghi lại request để assert phần gửi đi."""
     sent: dict = {}
 
-    def fake_post(url, json, timeout):  # noqa: A002 - khớp chữ ký httpx.post
+    def fake_post(url, json, timeout, headers=None):  # noqa: A002 - khớp chữ ký httpx.post
         sent["url"] = url
         sent["json"] = json
+        sent["headers"] = headers or {}
         return _FakeResponse(payload)
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -65,3 +66,39 @@ def test_content_rong_khong_phai_do_ngu_canh_van_bao_rong(monkeypatch):
     _patch_post(monkeypatch, _choice("   ", "stop"))
     with pytest.raises(RuntimeError, match="rỗng"):
         _describer().describe([b"\xff\xd8"], {})
+
+
+def test_deepseek_gui_dung_endpoint_model_va_bearer(monkeypatch):
+    # Cùng giao thức chat/completions, khác endpoint + header — đây là toàn bộ phần dễ sai
+    # khi đổi backend, nên khoá lại cả ba.
+    sent = _patch_post(monkeypatch, _choice("Cảnh quay hiện trường.", "stop"))
+    describer = DeepSeekDescriber(
+        Settings(deepseek_api_key="sk-test", deepseek_base_url="https://api.deepseek.com/")
+    )
+    assert describer.describe([b"\xff\xd8"], {}) == "Cảnh quay hiện trường."
+    # base_url có dấu '/' cuối không được sinh ra '//v1'.
+    assert sent["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert sent["json"]["model"] == "deepseek-flash"
+    assert sent["headers"]["Authorization"] == "Bearer sk-test"
+    assert sent["json"]["messages"][0]["content"][1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+
+
+def test_build_describer_chon_backend_theo_cau_hinh():
+    assert isinstance(build_describer(Settings(describe_backend="qwen3vl")), Qwen3VLDescriber)
+    assert isinstance(
+        build_describer(Settings(describe_backend="deepseek", deepseek_api_key="sk-test")),
+        DeepSeekDescriber,
+    )
+
+
+def test_deepseek_thieu_api_key_fail_luc_boot_chu_khong_phai_luc_goi():
+    # Thiếu key mà dựng được adapter thì lỗi chỉ hiện ra dưới dạng 401 trên TỪNG task.
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_describer(Settings(describe_backend="deepseek", deepseek_api_key=""))
+
+
+def test_backend_la_khong_hop_le_bao_ngay():
+    with pytest.raises(RuntimeError, match="DESCRIBE_BACKEND"):
+        build_describer(Settings(describe_backend="gpt4o"))

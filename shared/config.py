@@ -42,6 +42,21 @@ class Settings(BaseSettings):
     #   curl http://localhost:11434/api/create -d '{"model":"qwen3-vl:2b-ctx16k",
     #     "from":"qwen3-vl:2b","parameters":{"num_ctx":16384}}'
     describe_model_name: str = "qwen3-vl:2b-ctx16k"
+    # Backend sinh Scene Document: 'qwen3vl' (Model Server nội bộ, mặc định — đúng với
+    # air-gap AD-14) | 'deepseek' (API đám mây, dùng khi node chưa có GPU đủ chạy model
+    # VL). Hai backend nói CÙNG giao thức /v1/chat/completions nên chỉ khác endpoint,
+    # tên model và header xác thực — xem pipeline/describe_backends.py.
+    describe_backend: str = "deepseek"
+    # DeepSeek — chỉ dùng khi describe_backend='deepseek'.
+    # CẢNH BÁO: keyframe RỜI máy chủ (gửi base64 lên api.deepseek.com), ngược với mặc
+    # định air-gap của AD-14 — chỉ bật cho tư liệu được phép ra ngoài.
+    # base_url không kèm '/v1': adapter tự nối như với các model server khác.
+    deepseek_base_url: str = "https://api.deepseek.com"
+    # Mặc định RỖNG và phải giữ rỗng: file này do git theo dõi. Key thật đặt qua env
+    # (deploy/worker.local.env cho worker host, deploy/.env cho compose — đều gitignore).
+    deepseek_api_key: str = ""
+    # DeepSeek không có tag num_ctx dẫn xuất như Ollama nên đây là tên model trần.
+    deepseek_model: str = "deepseek-flash"
     rerank_model_url: str = "http://host.docker.internal:8090"
     # Detect (Story 1.3): worker chạy tách scene/shot ngay sau khi đăng ký Video.
     # Tắt (DETECT_ON_INGEST=false) khi chỉ muốn nạp danh mục video mà chưa decode.
@@ -62,6 +77,17 @@ class Settings(BaseSettings):
     # Internet rồi copy sang node. Trong container: mount vào /models (docker-compose.yml).
     # PhoWhisper-large đã convert CTranslate2 (faster-whisper nạp theo đường dẫn thư mục).
     asr_model_dir: str = "./_data/models/PhoWhisper-large-ct2"
+    # Thiết bị + kiểu tính toán của faster-whisper/CTranslate2 (KHÁC `enrich_device` bên
+    # dưới, vốn chỉ dành cho EasyOCR/VietOCR chạy trên PyTorch).
+    # 'auto' | 'cpu' | 'cuda' — CTranslate2 KHÔNG có backend Metal/MPS, nên trên Apple
+    # Silicon chỉ có đường CPU; đặt 'mps' là lỗi.
+    asr_device: str = "auto"
+    # 'default' giữ nguyên kiểu đã lưu trong model. Trọng số dựng bằng fetch-models.sh mặc
+    # định là float16 -> trên CPU không chạy được fp16, ctranslate2 tự nở ngược lên float32
+    # (cảnh báo `compute type ... converted to float32`): tốn gấp đôi RAM và chậm hơn.
+    # Đặt 'int8' để lượng tử hoá NGAY LÚC NẠP (không cần convert lại trọng số) — đây là
+    # lựa chọn cho node CPU/Apple Silicon. Node GPU giữ 'float16'.
+    asr_compute_type: str = "default"
     # Tắt riêng OCR, vẫn chạy ASR. Dùng khi trọng số OCR chưa nạp được trên node: OCR
     # không chạy thì KHÔNG ghi gì vào scene.ocr_text (AD-5), nên kết quả OCR của lượt
     # trước không bị xoá. ASR không có cờ riêng — tắt ASR = tắt luôn enrich_on_ingest.
@@ -70,9 +96,9 @@ class Settings(BaseSettings):
     ocr_detector_dir: str = "./_data/models/easyocr"
     # Thư mục chứa <model>.pth + <model>.yml của VietOCR (config hợp nhất, tránh gọi mạng).
     ocr_recognizer_dir: str = "./_data/models/vietocr"
-    # 'cpu' | 'cuda' — dùng cho EasyOCR/VietOCR. faster-whisper tự dò ('auto') nên không
-    # đọc biến này. Triển khai đích là 1 node GPU (AD-14): đặt 'cuda' khi node có GPU, OCR
-    # hàng trăm keyframe/video trên CPU rất chậm.
+    # 'cpu' | 'cuda' — dùng cho EasyOCR/VietOCR. faster-whisper đọc `asr_device` riêng ở
+    # trên (hai stack khác nhau: PyTorch vs CTranslate2). Triển khai đích là 1 node GPU
+    # (AD-14): đặt 'cuda' khi node có GPU, OCR hàng trăm keyframe/video trên CPU rất chậm.
     enrich_device: str = "cpu"
     # Index (Story 1.6 wiring): worker chạy describe (Qwen3-VL) -> embed/index (BGE-M3) cho
     # từng scene sau enrich. Đây là stage DUY NHẤT set `scene.search_status='indexed'`

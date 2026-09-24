@@ -53,7 +53,12 @@ def _build_enrich_ports(settings, storage):
         return None, None
     from pipeline.enrich_backends import PhoWhisperTranscriber, VietOcrReader
 
-    transcriber = PhoWhisperTranscriber(storage=storage, model_dir=settings.asr_model_dir)
+    transcriber = PhoWhisperTranscriber(
+        storage=storage,
+        model_dir=settings.asr_model_dir,
+        device=settings.asr_device,
+        compute_type=settings.asr_compute_type,
+    )
     ocr = None
     if settings.enrich_ocr:
         ocr = VietOcrReader(
@@ -84,15 +89,21 @@ def _build_index_ports(settings):
     if not settings.index_on_ingest:
         log.info("describe/index tắt theo cấu hình", extra={"stage": "worker-boot"})
         return None, None
-    from pipeline.describe_backends import Qwen3VLDescriber
+    from pipeline.describe_backends import build_describer
     from pipeline.embed_backends import BgeM3Embedder
 
+    # build_describer raise ngay nếu DESCRIBE_BACKEND sai hoặc thiếu API key — lỗi cấu
+    # hình thì fail lúc boot, đừng để mọi task rơi vào 'error'.
+    describer = build_describer(settings)
+    if settings.describe_backend.strip().lower() == "deepseek":
+        describe_target = f"DeepSeek {settings.deepseek_model} @ {settings.deepseek_base_url}"
+    else:
+        describe_target = f"{settings.describe_model_name} @ {settings.describe_model_url}"
     log.info(
-        f"index bật: {settings.describe_model_name} @ {settings.describe_model_url}, "
-        f"BGE-M3 @ {settings.embed_model_url}",
+        f"index bật: {describe_target}, BGE-M3 @ {settings.embed_model_url}",
         extra={"stage": "worker-boot"},
     )
-    return Qwen3VLDescriber(settings), BgeM3Embedder(settings)
+    return describer, BgeM3Embedder(settings)
 
 
 async def _loop(poll_seconds: float = 2.0) -> None:

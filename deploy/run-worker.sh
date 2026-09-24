@@ -61,7 +61,16 @@ export OCR_RECOGNIZER_DIR="${OCR_RECOGNIZER_DIR:-$REPO_ROOT/_data/models/vietocr
 # KHÔNG ghi gì vào scene.ocr_text (AD-5) nên kết quả lượt trước không bị xoá.
 export ENRICH_OCR="${ENRICH_OCR:-false}"
 export ENRICH_DEVICE="${ENRICH_DEVICE:-cpu}"
+# ASR chạy trên CTranslate2, không phải PyTorch: không có 'mps' nên trên Apple Silicon chỉ
+# còn CPU. Trọng số float16 nạp trên CPU sẽ bị nở lên float32 (gấp đôi RAM, chậm hơn) —
+# int8 lượng tử hoá ngay lúc nạp nên không phải convert lại trọng số. Node GPU:
+# ASR_DEVICE=cuda ASR_COMPUTE_TYPE=float16.
+export ASR_DEVICE="${ASR_DEVICE:-cpu}"
+export ASR_COMPUTE_TYPE="${ASR_COMPUTE_TYPE:-int8}"
 
+# 'qwen3vl' (model server nội bộ) | 'deepseek' (API đám mây — keyframe rời khỏi máy chủ,
+# cần DEEPSEEK_API_KEY, xem shared/config.py).
+export DESCRIBE_BACKEND="${DESCRIBE_BACKEND:-qwen3vl}"
 export DESCRIBE_MODEL_URL="${DESCRIBE_MODEL_URL:-http://localhost:11434}"
 export EMBED_MODEL_URL="${EMBED_MODEL_URL:-http://localhost:11434}"
 
@@ -102,7 +111,12 @@ if [ "$ENRICH_ON_INGEST" = "true" ] && [ ! -f "$ASR_MODEL_DIR/tokenizer.json" ];
   echo "Chạy deploy/fetch-models.sh trên máy có Internet rồi copy sang." >&2
   exit 1
 fi
-if [ "$INDEX_ON_INGEST" = "true" ]; then
+if [ "$INDEX_ON_INGEST" = "true" ] && [ "$DESCRIBE_BACKEND" = "deepseek" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+  echo "DESCRIBE_BACKEND=deepseek nhưng chưa có DEEPSEEK_API_KEY." >&2
+  exit 1
+fi
+# Phần dựng tag num_ctx chỉ có nghĩa với Ollama tự host — backend deepseek bỏ qua.
+if [ "$INDEX_ON_INGEST" = "true" ] && [ "$DESCRIBE_BACKEND" = "qwen3vl" ]; then
   if ! curl -sf -m 5 "$DESCRIBE_MODEL_URL/api/tags" >/dev/null 2>&1; then
     echo "Không gọi được model server ở $DESCRIBE_MODEL_URL — chạy \`ollama serve\` trước." >&2
     exit 1
@@ -124,8 +138,14 @@ echo "==> mode      : $MODE (detect=$DETECT_ON_INGEST enrich=$ENRICH_ON_INGEST i
 echo "==> python    : $PY_BIN"
 echo "==> media     : $MEDIA_ROOT"
 echo "==> database  : ${DATABASE_URL##*@}"
-[ "$ENRICH_ON_INGEST" = "true" ] && echo "==> asr        : $ASR_MODEL_DIR (ocr=$ENRICH_OCR)"
-[ "$INDEX_ON_INGEST" = "true" ] && echo "==> model srv  : $DESCRIBE_MODEL_URL ($DESCRIBE_MODEL_NAME)"
+[ "$ENRICH_ON_INGEST" = "true" ] && echo "==> asr        : $ASR_MODEL_DIR ($ASR_DEVICE/$ASR_COMPUTE_TYPE, ocr=$ENRICH_OCR)"
+if [ "$INDEX_ON_INGEST" = "true" ]; then
+  if [ "$DESCRIBE_BACKEND" = "deepseek" ]; then
+    echo "==> describe   : DeepSeek API (${DEEPSEEK_MODEL:-deepseek-flash})"
+  else
+    echo "==> model srv  : $DESCRIBE_MODEL_URL ($DESCRIBE_MODEL_NAME)"
+  fi
+fi
 echo
 
 # cd vào repo: shared/config.py đọc .env theo thư mục hiện tại, và ASR_MODEL_DIR mặc định

@@ -86,10 +86,15 @@ Không có cờ riêng để tắt ASR: tắt ASR nghĩa là tắt luôn `ENRICH
 - **VietOCR:** `ModuleNotFoundError: No module named 'pkg_resources'`. vietocr vẫn import
   `pkg_resources`, thứ đã bị gỡ khỏi môi trường Python ≥3.12 khi không có setuptools. Cài
   thêm `setuptools` vào cùng venv rồi chạy lại `fetch-models.sh`.
-- **ASR trên CPU:** ctranslate2 báo `compute type ... float16 ... converted to float32` —
-  máy không chạy được float16 nên model nở gấp đôi bộ nhớ và chậm hơn. Trên node CPU nên
-  dựng lại bằng `ASR_QUANTIZATION=int8 deploy/fetch-models.sh`; trên node GPU thì float16
-  là đúng.
+- **ASR trên CPU / Apple Silicon:** ctranslate2 báo `compute type ... float16 ...
+  converted to float32` — máy không chạy được float16 nên model nở gấp đôi bộ nhớ và chậm
+  hơn. Đặt `ASR_COMPUTE_TYPE=int8` (lượng tử hoá ngay lúc nạp, **không** phải convert lại
+  trọng số); muốn trọng số trên đĩa cũng nhỏ đi thì dựng lại bằng
+  `ASR_QUANTIZATION=int8 deploy/fetch-models.sh`. Node GPU giữ `ASR_DEVICE=cuda
+  ASR_COMPUTE_TYPE=float16`.
+  `ASR_DEVICE=mps` **không tồn tại**: CTranslate2 chỉ có backend CPU và CUDA, không có
+  Metal — trên Mac M-series đường duy nhất là `ASR_DEVICE=cpu` (adapter chặn 'mps' ngay ở
+  boot với thông báo này). `ENRICH_DEVICE` là biến khác, chỉ dành cho EasyOCR/VietOCR.
 
 ### Dựng trọng số (bước một lần, trên máy có Internet)
 
@@ -220,6 +225,30 @@ Khi triển khai on-prem có GPU NVIDIA thật thì tách lại thành hai model
 (cổng 8001/8002 như thiết kế AD-14) — chỉ đổi env, code không cần sửa. Với vLLM nhớ đặt
 `--served-model-name` khớp với `DESCRIBE_MODEL_NAME` mà adapter gửi (vLLM đặt cửa sổ ngữ
 cảnh qua `--max-model-len` nên không cần tag dẫn xuất — chỉ cần đủ rộng cho prompt có ảnh).
+
+### Describe bằng API DeepSeek (thay cho Qwen3-VL tự host)
+
+Máy không đủ sức chạy model VL (không GPU, hoặc Ollama quá chậm) thì chuyển riêng stage
+describe sang API DeepSeek — embed/rerank vẫn chạy như cũ:
+
+```
+DESCRIBE_BACKEND=deepseek
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-flash          # tuỳ chọn, mặc định deepseek-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com   # tuỳ chọn
+```
+
+Khi đó `DESCRIBE_MODEL_URL` / `DESCRIBE_MODEL_NAME` **không được dùng tới**, và
+`deploy/run-worker.sh` bỏ qua bước dựng tag num_ctx (không còn ý nghĩa). Giao thức y hệt
+Ollama/vLLM — `POST /v1/chat/completions` với ảnh base64 trong `image_url` — nên adapter
+dùng chung thân xử lý, chỉ khác endpoint và header `Authorization: Bearer`.
+
+> ⚠️ **Đây là ngoại lệ của mô hình air-gap (AD-14).** Keyframe được gửi base64 lên
+> `api.deepseek.com`, tức tư liệu rời khỏi hạ tầng của toà soạn. Chỉ bật cho tư liệu được
+> phép ra ngoài; nghiệp vụ nhạy cảm thì giữ `DESCRIBE_BACKEND=qwen3vl`.
+
+Thiếu `DEEPSEEK_API_KEY` thì worker **fail ngay lúc boot** (không phải từng task rơi vào
+`error`) — `build_describer` trong `pipeline/describe_backends.py` kiểm tra trước.
 
 ⚠️ `rerank_model_url` (bge-reranker-v2-m3, 8003) **vẫn chưa có server nào**. Search trả kết
 quả đúng khi DB rỗng hoặc khi rerank bị bỏ qua theo `rerank_skip_gap`, nhưng sẽ trả lỗi 502
