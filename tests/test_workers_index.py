@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from pipeline.detect import DetectedScene, DetectedShot, Detection
+from pipeline.enrich import TranscriptSegment
 from pipeline.workers import drain, process_task
 from shared.ids import scene_id as make_scene_id
 from shared.ids import shot_id as make_shot_id
@@ -37,8 +38,11 @@ class FakeExtractor:
 class FakeTranscriber:
     language = "vi"
 
-    def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:
-        return f"lời thoại {start_ms}"
+    def transcribe(self, media_key: str) -> list[TranscriptSegment]:
+        return [
+            TranscriptSegment(0, 2000, "lời thoại 0"),
+            TranscriptSegment(2000, 4000, "lời thoại 2000"),
+        ]
 
 
 class FakeDescriber:

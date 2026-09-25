@@ -8,6 +8,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from pipeline.detect import DetectedScene, DetectedShot, Detection
+from pipeline.enrich import TranscriptSegment
 from pipeline.workers import drain, process_task
 from shared.ids import scene_id as make_scene_id
 from shared.ids import shot_id as make_shot_id
@@ -41,11 +42,14 @@ class FakeTranscriber:
     language = "vi"
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int, int]] = []
+        self.calls: list[str] = []
 
-    def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:
-        self.calls.append((media_key, start_ms, end_ms))
-        return f"lời thoại {start_ms}"
+    def transcribe(self, media_key: str) -> list[TranscriptSegment]:
+        self.calls.append(media_key)
+        return [
+            TranscriptSegment(0, 2000, "lời thoại 0"),
+            TranscriptSegment(2000, 4000, "lời thoại 2000"),
+        ]
 
 
 class FakeOcr:
@@ -55,26 +59,39 @@ class FakeOcr:
         return image.decode()
 
 
-class EnglishOnlyTranscriber:
-    language = "en"
-
-    def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:
-        return "hello"
-
-
-class BoomTranscriber:
-    """Hỏng ở scene đầu, chạy được ở các scene sau."""
+class BoomOcr:
+    """Hỏng ở scene đầu (keyframe img-0), chạy được ở các scene sau."""
 
     language = "vi"
 
     def __init__(self) -> None:
         self.calls = 0
 
-    def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:
+    def read_text(self, image: bytes) -> str:
         self.calls += 1
-        if start_ms == 0:
-            raise RuntimeError("ASR hỏng")
-        return "ok"
+        if image == b"img-0":
+            raise RuntimeError("OCR hỏng")
+        return image.decode()
+
+
+class EnglishOnlyTranscriber:
+    language = "en"
+
+    def transcribe(self, media_key: str) -> list[TranscriptSegment]:
+        return []
+
+
+class BoomTranscriber:
+    """ASR hỏng: theo hợp đồng mới model chạy MỘT lần/video nên hỏng cả video."""
+
+    language = "vi"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transcribe(self, media_key: str) -> list[TranscriptSegment]:
+        self.calls += 1
+        raise RuntimeError("ASR hỏng")
 
 
 async def _seed_task(session, source_key: str = "a.mp4") -> IngestTask:
@@ -102,8 +119,8 @@ async def test_process_task_enriches_every_scene_after_detect(tmp_path, async_se
     ).scalars().all()
     assert [s.transcript for s in scenes] == ["lời thoại 0", "lời thoại 2000"]
     assert [s.ocr_text for s in scenes] == ["img-0", "img-2000"]
-    # ASR nhận media-key + timecode của scene, không phải path tuyệt đối
-    assert transcriber.calls == [("a.mp4", 0, 2000), ("a.mp4", 2000, 4000)]
+    # ASR nhận media-key của video và chạy MỘT lần cho cả video, không phải mỗi scene
+    assert transcriber.calls == ["a.mp4"]
 
 
 async def test_process_task_skips_enrich_when_ports_missing(tmp_path, async_session):
@@ -162,6 +179,31 @@ async def test_ad9_guard_marks_task_error_without_touching_scenes(tmp_path, asyn
 
 async def test_one_bad_scene_does_not_block_the_rest_but_fails_task(tmp_path, async_session):
     task = await _seed_task(async_session)
+    transcriber = FakeTranscriber()
+    ocr = BoomOcr()
+
+    await process_task(
+        async_session, task,
+        detector=FakeDetector(), extractor=FakeExtractor(),
+        storage=FilesystemStorage(tmp_path),
+        transcriber=transcriber, ocr=ocr,
+    )
+
+    assert ocr.calls == 2  # scene sau vẫn được thử dù scene đầu hỏng
+    assert transcriber.calls == ["a.mp4"]  # ASR một lần/video, không phụ thuộc lỗi OCR
+    scenes = (
+        await async_session.execute(select(Scene).order_by(Scene.start_ms))
+    ).scalars().all()
+    # scene 0 hỏng OCR trước khi kịp ghi transcript; scene 1 ghi đủ cả hai cột
+    assert [s.transcript for s in scenes] == [None, "lời thoại 2000"]
+    assert task.status == "error"  # lỗi không bị nuốt -> lượt sau chạy lại, ghi đè
+    assert "1/2 scene" in task.reason
+
+
+async def test_asr_failure_fails_whole_video(tmp_path, async_session):
+    # Hợp đồng mới: model chạy MỘT lần/video nên ASR hỏng là hỏng cả video, không có
+    # chuyện "scene sau vẫn chạy" như khi transcribe theo từng scene.
+    task = await _seed_task(async_session)
     transcriber = BoomTranscriber()
 
     await process_task(
@@ -171,13 +213,11 @@ async def test_one_bad_scene_does_not_block_the_rest_but_fails_task(tmp_path, as
         transcriber=transcriber, ocr=FakeOcr(),
     )
 
-    assert transcriber.calls == 2  # scene sau vẫn được thử dù scene đầu hỏng
-    scenes = (
-        await async_session.execute(select(Scene).order_by(Scene.start_ms))
-    ).scalars().all()
-    assert [s.transcript for s in scenes] == [None, "ok"]
-    assert task.status == "error"  # lỗi không bị nuốt -> lượt sau chạy lại, ghi đè
-    assert "1/2 scene" in task.reason
+    assert transcriber.calls == 1  # gọi đúng một lần rồi bỏ
+    scenes = (await async_session.execute(select(Scene))).scalars().all()
+    assert all(s.transcript is None for s in scenes)
+    assert task.status == "error"
+    assert "ASR hỏng" in task.reason
 
 
 async def test_drain_passes_enrich_ports_through(tmp_path, async_session):

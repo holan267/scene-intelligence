@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline.enrich import TranscriptSegment
 from shared.storage import StoragePort, build_storage
 
 _FETCH_HINT = "Chạy `deploy/fetch-models.sh` trên máy có Internet rồi copy sang node này"
@@ -60,8 +61,8 @@ class PhoWhisperTranscriber:
     def _lazy(self):
         """Nạp model MỘT lần cho cả vòng đời worker.
 
-        enrich gọi `transcribe()` theo từng scene (hàng trăm lần cho một video tin tức);
-        khởi tạo lại mỗi lần là vài GB I/O cho mỗi scene.
+        `transcribe()` được gọi một lần cho mỗi video, nhưng worker xử lý nhiều video liên
+        tiếp; khởi tạo lại model mỗi video là vài GB I/O mỗi lần.
         """
         if self._model is not None:
             return self._model
@@ -97,14 +98,35 @@ class PhoWhisperTranscriber:
         )
         return self._model  # pragma: no cover - phụ thuộc production
 
-    def transcribe(self, media_key: str, start_ms: int, end_ms: int) -> str:  # pragma: no cover - phụ thuộc production
+    def transcribe(self, media_key: str) -> list[TranscriptSegment]:  # pragma: no cover - phụ thuộc production
+        """Transcribe TRỌN video một lần; cắt theo scene do `transcript_for_range` lo.
+
+        Mỗi lần gọi `WhisperModel.transcribe()` chạy trọn một encoder pass (audio pad lên
+        cửa sổ 30s), nên gọi theo từng scene là O(số scene × 30s). `beam_size=1` (greedy)
+        nhanh hơn beam mặc định 5 mà đủ cho lời thoại tin tức.
+
+        `word_timestamps=True` trả mốc theo TỪ: timestamp mức câu quá thô (một câu có thể
+        trải 20s), cắt theo scene bằng nó sẽ rỗng/ăn sai scene. Word-level cũng giữ chi phí
+        gần như không đổi vì encoder vẫn chạy một lần.
+        """
         model = self._lazy()
         path = self._storage.local_path(media_key)  # qua port (AD-23)
-        # clip_timestamps nhận giây: chỉ decode đoạn audio của scene, không chạy cả video.
         segments, _ = model.transcribe(
-            path, language="vi", clip_timestamps=[start_ms / 1000, end_ms / 1000]
+            path, language="vi", beam_size=1, word_timestamps=True
         )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        pieces: list[TranscriptSegment] = []
+        for seg in segments:
+            words = getattr(seg, "words", None)
+            if words:
+                pieces.extend(
+                    TranscriptSegment(int(w.start * 1000), int(w.end * 1000), w.word.strip())
+                    for w in words
+                )
+            else:  # phòng khi model không trả word-level: dùng nguyên câu
+                pieces.append(
+                    TranscriptSegment(int(seg.start * 1000), int(seg.end * 1000), seg.text.strip())
+                )
+        return pieces
 
 
 class VietOcrReader:

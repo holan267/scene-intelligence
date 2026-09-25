@@ -11,6 +11,7 @@ import types
 
 import pytest
 
+from pipeline.enrich import TranscriptSegment
 from pipeline.enrich_backends import PhoWhisperTranscriber, VietOcrReader
 
 
@@ -108,3 +109,41 @@ def test_asr_passes_device_and_compute_type_to_faster_whisper(tmp_path, monkeypa
     _asr(model_dir, device="cpu", compute_type="int8")._lazy()
 
     assert seen == {"model_dir": str(model_dir), "device": "cpu", "compute_type": "int8"}
+
+
+def test_asr_transcribe_is_greedy_word_level_and_returns_ms_segments(tmp_path, monkeypatch):
+    # Hợp đồng mới: transcribe() chạy MỘT lần cho cả video, trả mảnh ở mức TỪ có mốc ms để
+    # pipeline cắt theo scene; beam_size=1 + word_timestamps=True là chủ ý.
+    seen = {}
+
+    class FakeWord:
+        def __init__(self, start, end, word):
+            self.start, self.end, self.word = start, end, word
+
+    class FakeSegment:
+        def __init__(self, start, end, text, words=None):
+            self.start, self.end, self.text, self.words = start, end, text, words
+
+    class FakeWhisperModel:
+        def __init__(self, model_dir, device, compute_type):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            seen.update(path=path, kwargs=kwargs)
+            return iter([
+                FakeSegment(0.0, 1.5, " Xin chào", [FakeWord(0.0, 0.5, " Xin"), FakeWord(0.5, 1.5, " chào")]),
+                FakeSegment(2.0, 3.0, "cũ"),  # không có words -> fallback về mức câu
+            ]), object()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeWhisperModel)
+    )
+    segments = _asr(_ready_model_dir(tmp_path), device="cpu", compute_type="int8").transcribe("a.mp4")
+
+    assert seen["path"] == "/media/a.mp4"  # qua storage-port, không phải path tuyệt đối
+    assert seen["kwargs"] == {"language": "vi", "beam_size": 1, "word_timestamps": True}
+    assert segments == [
+        TranscriptSegment(0, 500, "Xin"),
+        TranscriptSegment(500, 1500, "chào"),
+        TranscriptSegment(2000, 3000, "cũ"),
+    ]

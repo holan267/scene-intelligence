@@ -137,9 +137,14 @@ async def _enrich_video(
     transcriber: Transcriber,
     ocr: OcrReader | None,
 ) -> dict:
-    """ASR + OCR cho MỌI scene của video; mỗi scene chỉ ghi cột của stage mình (AD-5).
+    """ASR MỘT lần cho cả video + OCR từng scene; mỗi scene chỉ ghi cột của stage mình (AD-5).
 
     `ocr=None` => ASR-only, `scene.ocr_text` giữ nguyên (xem enrich_scene_vietnamese).
+
+    ASR chạy đúng một lần (`transcriber.transcribe`) rồi cắt theo timecode từng scene:
+    mỗi lần gọi model trả giá trọn một encoder pass Whisper (pad lên cửa sổ 30s), nên gọi
+    theo scene là O(số scene × 30s). Lỗi ASR hỏng cả video (raise trước vòng lặp scene);
+    lỗi OCR/ghi của MỘT scene không chặn các scene còn lại.
 
     Ghi đè cột riêng nên chạy lại là idempotent (Story 1.4) — task bị reclaim/retry
     enrich lại từ đầu mà không cộng dồn.
@@ -149,20 +154,26 @@ async def _enrich_video(
     Đẩy sang thread khi worker phải chạy song song nhiều video.
 
     Một scene hỏng KHÔNG chặn các scene còn lại (video tin tức có hàng trăm scene; mất
-    cả video vì một lỗi ASR là quá đắt) nhưng cũng KHÔNG bị nuốt: gom lại rồi raise ở
+    cả video vì một lỗi OCR là quá đắt) nhưng cũng KHÔNG bị nuốt: gom lại rồi raise ở
     cuối -> process_task đánh dấu task 'error' và lượt sau chạy lại, ghi đè.
     """
     assert_vietnamese_models(transcriber, ocr)  # AD-9: fail ngay, không lặp lỗi từng scene
+    video = await session.get(Video, video_id)
+    if video is None:
+        raise ValueError(f"video không tồn tại: {video_id}")
     scene_ids = (
         await session.execute(
             select(Scene.scene_id).where(Scene.video_id == video_id).order_by(Scene.start_ms)
         )
     ).scalars().all()
 
+    # Không có scene thì khỏi transcribe: decode/encode cả video chỉ để cắt ra rỗng là vô ích.
+    segments = transcriber.transcribe(video.source_key) if scene_ids else []
+
     failures: list[str] = []
     for sid in scene_ids:
         try:
-            await enrich_scene_vietnamese(session, storage, sid, transcriber, ocr)
+            await enrich_scene_vietnamese(session, storage, sid, segments, ocr)
         except Exception as exc:  # noqa: BLE001 - gom lỗi, báo sau khi chạy hết scene
             failures.append(f"{sid}: {exc}")
     if failures:
