@@ -8,6 +8,9 @@
 - claim_next_task: SKIP LOCKED (Postgres), có tiebreaker; finalize_job: orchestrator (AD-18).
 - reclaim_stale_tasks (Story 1.7, NFR-2): orchestrator requeue/expire task 'claimed' quá lease
   khi worker crash — không mất việc (xem pipeline/workers.py::drain, gọi mỗi vòng lặp).
+- Quản trị kho (giao diện web): list_videos/list_jobs/list_tasks để hiển thị, và
+  requeue_task/requeue_job/requeue_failed để đẩy task lỗi/bỏ-qua trở lại hàng đợi dưới một
+  Job mới — cùng khuôn orchestrator AD-18 với enqueue_batch/reclaim_stale_tasks.
 
 Ghi chú (defer): `existing` nạp toàn bộ source_key vào bộ nhớ (chưa bound); an toàn cạnh
 tranh đa tiến trình cần INSERT ON CONFLICT — xem deferred-work.md.
@@ -23,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.config import get_settings
 from shared.ids import new_id
-from shared.models import IngestTask, Job
+from shared.models import IngestTask, Job, Scene, Video
 
 VIDEO_EXTS = {".mp4", ".mov", ".mxf", ".mkv", ".avi", ".ts", ".m4v", ".mpg", ".mpeg", ".webm"}
 _RETRYABLE = {"skipped", "error"}
@@ -209,3 +212,196 @@ async def reclaim_stale_tasks(
             expired += 1
     await session.flush()
     return {"requeued": requeued, "expired": expired, "job_ids": job_ids}
+
+
+# --- Quản trị kho (giao diện web): liệt kê video/job/task + requeue từ UI ---------------
+# UI KHÔNG nhận media-key/path thật (AD-19) — mọi dict trả ra chỉ có `name` = tên tệp
+# (basename của source_key) để người vận hành nhận diện, không có source_key đầy đủ.
+
+_IN_FLIGHT = {"queued", "claimed"}
+
+
+def _display_name(source_key: str) -> str:
+    return Path(source_key).name
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+async def list_videos(session: AsyncSession, *, limit: int = 50, offset: int = 0) -> dict:
+    """Liệt kê Video kèm số Scene + số Scene đã index (màn quản lý video)."""
+    total = (await session.execute(select(func.count()).select_from(Video))).scalar_one()
+    rows = (
+        await session.execute(
+            select(
+                Video.video_id,
+                Video.source_key,
+                Video.framerate,
+                Video.created_at,
+                func.count(Scene.scene_id),
+            )
+            .outerjoin(Scene, Scene.video_id == Video.video_id)
+            .group_by(Video.video_id, Video.source_key, Video.framerate, Video.created_at)
+            .order_by(Video.created_at.desc(), Video.video_id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    video_ids = [row[0] for row in rows]
+    indexed: dict[str, int] = {}
+    if video_ids:
+        idx_rows = (
+            await session.execute(
+                select(Scene.video_id, func.count())
+                .where(Scene.video_id.in_(video_ids), Scene.search_status == "indexed")
+                .group_by(Scene.video_id)
+            )
+        ).all()
+        indexed = dict(idx_rows)
+
+    results = [
+        {
+            "video_id": video_id,
+            "name": _display_name(source_key),
+            "framerate": framerate,
+            "created_at": _iso(created_at),
+            "scene_count": scene_count,
+            "indexed_count": indexed.get(video_id, 0),
+            "pending_count": scene_count - indexed.get(video_id, 0),
+        }
+        for video_id, source_key, framerate, created_at, scene_count in rows
+    ]
+    return {"results": results, "total": total}
+
+
+async def list_jobs(session: AsyncSession, *, limit: int = 50, offset: int = 0) -> dict:
+    """Liệt kê Job kèm phân bố trạng thái task (màn ingest status)."""
+    total = (await session.execute(select(func.count()).select_from(Job))).scalar_one()
+    jobs = (
+        await session.execute(
+            select(Job)
+            .order_by(Job.created_at.desc(), Job.job_id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    counts = (
+        await session.execute(
+            select(IngestTask.job_id, IngestTask.status, func.count())
+            .group_by(IngestTask.job_id, IngestTask.status)
+        )
+    ).all()
+    by_job: dict[str, dict[str, int]] = {}
+    for job_id, status, n in counts:
+        by_job.setdefault(job_id, {})[status] = n
+
+    results = []
+    for job in jobs:
+        c = by_job.get(job.job_id, {})
+        results.append(
+            {
+                "job_id": job.job_id,
+                "kind": job.kind,
+                "status": job.status,
+                "created_at": _iso(job.created_at),
+                "total": sum(c.values()),
+                "done": c.get("done", 0),
+                "queued": c.get("queued", 0),
+                "claimed": c.get("claimed", 0),
+                "skipped": c.get("skipped", 0),
+                "error": c.get("error", 0),
+            }
+        )
+    return {"results": results, "total": total}
+
+
+async def list_tasks(
+    session: AsyncSession, *, status: str | None = None, limit: int = 50, offset: int = 0
+) -> dict:
+    """Liệt kê IngestTask (lọc theo status) — nguồn cho bảng task + nút requeue."""
+    conds = [IngestTask.status == status] if status else []
+    total_q = select(func.count()).select_from(IngestTask)
+    q = select(IngestTask).order_by(IngestTask.created_at.desc(), IngestTask.task_id.desc())
+    if conds:
+        total_q = total_q.where(*conds)
+        q = q.where(*conds)
+    total = (await session.execute(total_q)).scalar_one()
+    tasks = (await session.execute(q.limit(limit).offset(offset))).scalars().all()
+    results = [
+        {
+            "task_id": t.task_id,
+            "job_id": t.job_id,
+            "name": _display_name(t.source_key),
+            "status": t.status,
+            "reason": t.reason,
+            "attempts": t.attempts,
+            "video_id": t.video_id,
+            "claimed_at": _iso(t.claimed_at),
+            "finished_at": _iso(t.finished_at),
+            "created_at": _iso(t.created_at),
+        }
+        for t in tasks
+    ]
+    return {"results": results, "total": total}
+
+
+async def _requeue(session: AsyncSession, tasks: list[IngestTask]) -> dict:
+    """Đưa các task đã chọn về 'queued' dưới MỘT Job mới (đơn vị orchestration AD-18).
+
+    Task đang 'queued'/'claimed' bị bỏ qua: chúng đang chờ/đang chạy, requeue nữa sẽ khiến
+    worker thứ hai xử lý trùng. Reset attempts/claimed_at/finished_at/reason như đường
+    `enqueue_batch` (Story 1.7) để lượt chạy mới có trọn `task_max_attempts`.
+    """
+    runnable = [t for t in tasks if t.status not in _IN_FLIGHT]
+    if not runnable:
+        return {"job_id": None, "requeued": 0, "skipped": len(tasks)}
+
+    job = Job(job_id=new_id(), kind="requeue", status="running")
+    session.add(job)
+    await session.flush()
+    for task in runnable:
+        task.job_id = job.job_id
+        task.status = "queued"
+        task.reason = None
+        task.claimed_at = None
+        task.attempts = 0
+        task.finished_at = None
+    await session.flush()
+    return {"job_id": job.job_id, "requeued": len(runnable), "skipped": len(tasks) - len(runnable)}
+
+
+async def requeue_task(session: AsyncSession, task_id: str) -> dict | None:
+    """Requeue một task theo id. None nếu task không tồn tại."""
+    task = await session.get(IngestTask, task_id)
+    if task is None:
+        return None
+    return await _requeue(session, [task])
+
+
+async def requeue_job(session: AsyncSession, job_id: str, *, include_done: bool = False) -> dict | None:
+    """Requeue task lỗi/bỏ-qua của một Job (tuỳ chọn gồm cả task 'done' để chạy lại toàn bộ).
+
+    None nếu job không tồn tại. Task queued/claimed của job luôn được giữ nguyên.
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return None
+    tasks = (
+        await session.execute(select(IngestTask).where(IngestTask.job_id == job_id))
+    ).scalars().all()
+    targets = [
+        t for t in tasks if t.status in _RETRYABLE or (include_done and t.status == "done")
+    ]
+    result = await _requeue(session, targets)
+    result["matched"] = len(targets)
+    return result
+
+
+async def requeue_failed(session: AsyncSession) -> dict:
+    """Requeue MỌI task 'skipped'/'error' toàn kho (nút "Requeue tất cả lỗi")."""
+    tasks = (
+        await session.execute(select(IngestTask).where(IngestTask.status.in_(_RETRYABLE)))
+    ).scalars().all()
+    return await _requeue(session, tasks)

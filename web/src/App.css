@@ -53,3 +53,107 @@
   color: #fff;
   font-size: 0.85em;
 }
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.tabs button.active {
+  border-color: #646cff;
+  background-color: #646cff;
+  color: #fff;
+}
+
+.manage h2 {
+  font-size: 1.3em;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.metrics-bar {
+  display: flex;
+  gap: 2rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  border-radius: 8px;
+  background: rgba(100, 108, 255, 0.1);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.metric-value {
+  font-size: 1.8em;
+  font-weight: 600;
+}
+
+.metric-label {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.notice {
+  color: #30a46c;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+  font-size: 0.9em;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.3);
+  white-space: nowrap;
+}
+
+.data-table td {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1em 0.5em;
+  border-radius: 999px;
+  font-size: 0.85em;
+  background: rgba(128, 128, 128, 0.25);
+}
+
+.badge-done {
+  background: rgba(48, 164, 108, 0.25);
+  color: #30a46c;
+}
+
+.badge-error {
+  background: rgba(229, 72, 77, 0.25);
+  color: #e5484d;
+}
+
+.badge-queued,
+.badge-claimed,
+.badge-running {
+  background: rgba(100, 108, 255, 0.25);
+  color: #646cff;
+}
+
+.badge-skipped {
+  background: rgba(245, 166, 35, 0.25);
+  color: #b8791b;
+}

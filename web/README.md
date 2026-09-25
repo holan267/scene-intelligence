@@ -6,6 +6,15 @@ AD-19 — không auth/token cho MVP nội bộ, xem story 3.1 Scope Decision #1)
 
 Dựng thật ở Story 3.1 (Epic 3) — trước đó chỉ là stub (Story 1.1).
 
+## Màn hình
+
+- **Tìm kiếm** (`src/Search.tsx`): tìm kiếm NL + preview Scene (Story 3.1).
+- **Quản lý kho** (`src/Manage.tsx`): metrics vận hành, bảng ingest job/task, bảng video và
+  nút **Requeue** đưa task lỗi/bỏ-qua trở lại hàng đợi (tự làm mới mỗi 5s). Gọi
+  `GET /api/v1/videos`, `GET /api/v1/jobs`, `GET /api/v1/ingest/tasks`,
+  `GET /api/v1/metrics` và `POST .../requeue`.
+
+
 ## Dev
 
 Cần backend chạy song song ở `:8000` (`uv run uvicorn api.main:app --reload` hoặc
