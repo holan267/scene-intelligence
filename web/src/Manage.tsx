@@ -9,6 +9,7 @@ import type {
 } from './types'
 
 const POLL_MS = 5000
+const PAGE_SIZES = [10, 20, 50, 100]
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -30,6 +31,44 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`badge badge-${status}`}>{status}</span>
 }
 
+interface PaginatorProps {
+  page: number
+  pageSize: number
+  total: number
+  onPage: (page: number) => void
+  onPageSize: (size: number) => void
+}
+
+// Điều khiển phân trang phía server (limit/offset) — dùng chung cho mọi bảng dữ liệu.
+function Paginator({ page, pageSize, total, onPage, onPageSize }: PaginatorProps) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const from = total === 0 ? 0 : page * pageSize + 1
+  const to = Math.min((page + 1) * pageSize, total)
+  return (
+    <div className="pagination">
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        ‹ Trước
+      </button>
+      <span className="pagination-info">
+        {from}–{to} / {total}
+      </span>
+      <button type="button" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>
+        Sau ›
+      </button>
+      <label>
+        Hiển thị{' '}
+        <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}>
+          {PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  )
+}
+
 // Giao diện quản lý kho: video + ingest status, requeue task lỗi/bỏ-qua từ UI.
 // Tự làm mới mỗi 5s để thấy tiến độ worker; mọi thao tác đi qua REST /api/v1 (AD-13).
 function Manage() {
@@ -42,24 +81,52 @@ function Manage() {
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Phân trang riêng cho từng bảng (page 0-based).
+  const [jobsPage, setJobsPage] = useState(0)
+  const [jobsSize, setJobsSize] = useState(20)
+  const [jobsTotal, setJobsTotal] = useState(0)
+
+  const [tasksPage, setTasksPage] = useState(0)
+  const [tasksSize, setTasksSize] = useState(20)
+  const [tasksTotal, setTasksTotal] = useState(0)
+
+  const [videosPage, setVideosPage] = useState(0)
+  const [videosSize, setVideosSize] = useState(20)
+  const [videosTotal, setVideosTotal] = useState(0)
+
   const reload = useCallback(async () => {
     const query = statusFilter ? `&status=${statusFilter}` : ''
     try {
       const [v, j, t, m] = await Promise.all([
-        getJson<ListResponse<VideoRow>>('/api/v1/videos?limit=100'),
-        getJson<ListResponse<JobRow>>('/api/v1/jobs?limit=50'),
-        getJson<ListResponse<TaskRow>>(`/api/v1/ingest/tasks?limit=100${query}`),
+        getJson<ListResponse<VideoRow>>(
+          `/api/v1/videos?limit=${videosSize}&offset=${videosPage * videosSize}`,
+        ),
+        getJson<ListResponse<JobRow>>(`/api/v1/jobs?limit=${jobsSize}&offset=${jobsPage * jobsSize}`),
+        getJson<ListResponse<TaskRow>>(
+          `/api/v1/ingest/tasks?limit=${tasksSize}&offset=${tasksPage * tasksSize}${query}`,
+        ),
         getJson<MetricsResponse>('/api/v1/metrics'),
       ])
       setVideos(v.results)
+      setVideosTotal(v.meta.total)
       setJobs(j.results)
+      setJobsTotal(j.meta.total)
       setTasks(t.results)
+      setTasksTotal(t.meta.total)
       setMetrics(m.meta)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? `Không tải được dữ liệu (${e.message})` : 'Không tải được dữ liệu')
     }
-  }, [statusFilter])
+  }, [
+    statusFilter,
+    jobsPage,
+    jobsSize,
+    tasksPage,
+    tasksSize,
+    videosPage,
+    videosSize,
+  ])
 
   useEffect(() => {
     reload()
@@ -173,12 +240,28 @@ function Manage() {
           )}
         </tbody>
       </table>
+      <Paginator
+        page={jobsPage}
+        pageSize={jobsSize}
+        total={jobsTotal}
+        onPage={setJobsPage}
+        onPageSize={(size) => {
+          setJobsSize(size)
+          setJobsPage(0)
+        }}
+      />
 
       <h2>Tasks</h2>
       <div className="toolbar">
         <label>
           Lọc trạng thái:{' '}
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value)
+              setTasksPage(0)
+            }}
+          >
             <option value="">Tất cả</option>
             <option value="queued">queued</option>
             <option value="claimed">claimed</option>
@@ -230,6 +313,16 @@ function Manage() {
           )}
         </tbody>
       </table>
+      <Paginator
+        page={tasksPage}
+        pageSize={tasksSize}
+        total={tasksTotal}
+        onPage={setTasksPage}
+        onPageSize={(size) => {
+          setTasksSize(size)
+          setTasksPage(0)
+        }}
+      />
 
       <h2>Videos</h2>
       <table className="data-table">
@@ -261,6 +354,16 @@ function Manage() {
           )}
         </tbody>
       </table>
+      <Paginator
+        page={videosPage}
+        pageSize={videosSize}
+        total={videosTotal}
+        onPage={setVideosPage}
+        onPageSize={(size) => {
+          setVideosSize(size)
+          setVideosPage(0)
+        }}
+      />
     </div>
   )
 }
